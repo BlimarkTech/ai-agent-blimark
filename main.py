@@ -1,16 +1,17 @@
 import os
-from dotenv import load_dotenv
+import logging
 from fastapi import FastAPI
 from openai import OpenAI
 
-# Cargar variables de entorno
-load_dotenv()
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Configurar logging para mejor diagnóstico
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# Iniciar la aplicación FastAPI
+# Inicializar cliente de OpenAI y FastAPI
+openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
 
-# Instrucciones de sistema (tal como las tienes en el Playground)
+# Instrucciones de sistema
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
    - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
@@ -61,81 +62,67 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Configuración del File Search Tool apuntando al vector store
-tools = [
-    {
-        "type": "file_search",
-        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
-    }
-]
+# Configuración del vector store
+tools = [{
+    "type": "file_search",
+    "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
+}]
 
-# Definición de la función recolectarInformacionContacto
-functions = [
-    {
-        "name": "recolectarInformacionContacto",
-        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
-        "strict": False,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "nombre": {
-                    "type": "string",
-                    "description": "Nombre del lead."
-                },
-                "apellidos": {
-                    "type": "string",
-                    "description": "Apellidos del lead."
-                },
-                "email": {
-                    "type": "string",
-                    "description": "Correo electrónico del lead."
-                },
-                "telefono": {
-                    "type": "string",
-                    "description": "Número de teléfono del lead, incluyendo código de país si es posible."
-                },
-                "pais": {
-                    "type": "string",
-                    "description": "País de residencia del lead."
-                },
-                "mensaje": {
-                    "type": "string",
-                    "description": "Breve descripción de los servicios que el lead necesita (ejemplo: diseño web, servicios SEO, campañas SEM, etc.)."
-                }
-            },
-            "required": ["nombre", "email", "mensaje"]
-        }
+# Definición de la función
+functions = [{
+    "name": "recolectarInformacionContacto",
+    "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
+    "strict": False,
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "nombre": {"type": "string", "description": "Nombre del lead."},
+            "apellidos": {"type": "string", "description": "Apellidos del lead."},
+            "email": {"type": "string", "description": "Correo electrónico del lead."},
+            "telefono": {"type": "string", "description": "Número de teléfono del lead, incluyendo código de país si es posible."},
+            "pais": {"type": "string", "description": "País de residencia del lead."},
+            "mensaje": {"type": "string", "description": "Breve descripción de los servicios que el lead necesita."}
+        },
+        "required": ["nombre", "email", "mensaje"]
     }
-]
+}]
 
 @app.get("/chat")
 async def chat(query: str):
-    # Construir el array de mensajes con sistema y usuario
-    messages = [
-        {"role": "system", "content": SYSTEM_MESSAGE},
-        {"role": "user", "content": query}
-    ]
-
-    # Llamada a la Responses API con herramientas y función
-    response = await openai_client.responses.create(
-        model="gpt-4.1",
-        messages=messages,
-        tools=tools,
-        functions=functions
-    )
-
-    # Procesar salida o llamada a función
-    output = response.output[0]
-    if output.content:
-        text = output.content[0].text
-        return {"response": text}
-    elif output.function_call:
-        return {
-            "function_call": {
-                "name": output.function_call.name,
-                "arguments": output.function_call.arguments
+    logger.info(f"Recibida consulta: {query}")
+    try:
+        # Construir mensajes
+        messages = [
+            {"role": "system", "content": SYSTEM_MESSAGE},
+            {"role": "user", "content": query}
+        ]
+        
+        # CORRECCIÓN: Usar input=messages en lugar de messages=messages
+        response = await openai_client.responses.create(
+            model="gpt-4.1",
+            input=messages,
+            tools=tools,
+            functions=functions
+        )
+        
+        logger.info("Respuesta recibida de OpenAI")
+        output = response.output[0]
+        
+        if output.content:
+            text = output.content[0].text
+            logger.info(f"Respuesta de texto: {text[:50]}...")
+            return {"response": text}
+        elif output.function_call:
+            logger.info(f"Llamada a función: {output.function_call.name}")
+            return {
+                "function_call": {
+                    "name": output.function_call.name,
+                    "arguments": output.function_call.arguments
+                }
             }
-        }
-    else:
-        return {"response": None}
-
+        else:
+            logger.warning("No se obtuvo contenido ni llamada a función")
+            return {"response": "Lo siento, ocurrió un error al procesar tu consulta"}
+    except Exception as e:
+        logger.error(f"Error en procesamiento: {str(e)}", exc_info=True)
+        return {"error": str(e)}
