@@ -2,9 +2,8 @@ import os
 import logging
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
-from openai import AsyncOpenAI   # Cliente asíncrono
+from openai import AsyncOpenAI
 
-# Configuración de logging y cliente
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -82,36 +81,45 @@ async def chat(query: str):
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
-            tools=tools
+            tools=tools,
+            include=["file_search_call.results"]  # Para obtener resultados del file search
         )
-        output = response.output[0]
 
-        if output.content:
-            text = output.content[0].text
-            return JSONResponse(
-                content={"response": text},
-                media_type="application/json; charset=utf-8"
-            )
-
-        if output.function_call:
-            return JSONResponse(
-                content={
+        results = []
+        for output in response.output:
+            # Si es texto generado
+            if hasattr(output, "content") and output.content:
+                results.append({"response": output.content[0].text})
+            # Si es llamada a función
+            elif hasattr(output, "function_call"):
+                results.append({
                     "function_call": {
-                        "name":      output.function_call.name,
+                        "name": output.function_call.name,
                         "arguments": output.function_call.arguments
                     }
-                },
+                })
+            # Si es file_search
+            elif hasattr(output, "file_search_call"):
+                # Extrae resultados si los hay
+                file_results = getattr(output.file_search_call, "results", [])
+                results.append({
+                    "file_search_results": [
+                        {
+                            "text": res.text,
+                            "file_id": res.file_id
+                        } for res in file_results
+                    ]
+                })
+        if not results:
+            return JSONResponse(
+                content={"response": "No se pudo procesar la respuesta"},
                 media_type="application/json; charset=utf-8"
             )
-
-        return JSONResponse(
-            content={"response": "No se pudo procesar la respuesta"},
-            media_type="application/json; charset=utf-8"
-        )
-
+        # Si solo hay una respuesta, devuélvela directo
+        if len(results) == 1:
+            return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
+        # Si hay varias (texto + file_search), devuélvelas todas
+        return JSONResponse(content={"results": results}, media_type="application/json; charset=utf-8")
     except Exception as e:
         logger.error("Error en /chat:", exc_info=True)
-        return JSONResponse(
-            content={"error": str(e)},
-            media_type="application/json; charset=utf-8"
-        )
+        return JSONResponse(content={"error": str(e)}, media_type="application/json; charset=utf-8")
