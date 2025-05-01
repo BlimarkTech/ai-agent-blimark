@@ -68,21 +68,19 @@ tools = [
     },
     {
         "type": "function",
-        "function": {
-            "name": "recolectarInformacionContacto",
-            "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nombre": {"type": "string", "description": "Nombre del lead."},
-                    "apellidos": {"type": "string", "description": "Apellidos del lead."},
-                    "email": {"type": "string", "description": "Correo electrónico del lead."},
-                    "telefono": {"type": "string", "description": "Número de teléfono del lead."},
-                    "pais": {"type": "string", "description": "País de residencia del lead."},
-                    "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
-                },
-                "required": ["nombre", "email", "mensaje"]
-            }
+        "name": "recolectarInformacionContacto",
+        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del lead."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead."},
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead."},
+                "pais": {"type": "string", "description": "País de residencia del lead."},
+                "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
+            },
+            "required": ["nombre", "email", "mensaje"]
         }
     }
 ]
