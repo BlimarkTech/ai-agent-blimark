@@ -13,7 +13,8 @@ app = FastAPI()
 @app.get("/chat")
 def chat(query: str):
     response = openai_client.responses.create(
-        model="gpt-4o",
+        model="gpt-4.1",
         input=query
     )
     return {"response": response.output[0].content[0].text}
+
