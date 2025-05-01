@@ -1,12 +1,13 @@
 import os
 import logging
 from fastapi import FastAPI
-from openai import AsyncOpenAI   # ← Importa el cliente asíncrono
+from fastapi.responses import JSONResponse
+from openai import AsyncOpenAI   # Cliente asíncrono
 
 # Configuración de logging y cliente
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))  # ← Instancia asíncrona
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
 
 # Instrucciones de sistema
@@ -33,7 +34,7 @@ SYSTEM_MESSAGE = """
 
 5. **Programación de reuniones:**  
    *(…misma estructura que antes…)*
-   
+
 6. **Resolución de dudas:**  
    *(…misma estructura que antes…)*
 
@@ -78,23 +79,39 @@ async def chat(query: str):
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user",   "content": query}
         ]
-        # Ahora openai_client es AsyncOpenAI y su método es awaitable
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
             tools=tools
         )
         output = response.output[0]
+
         if output.content:
-            return {"response": output.content[0].text}
+            text = output.content[0].text
+            return JSONResponse(
+                content={"response": text},
+                media_type="application/json; charset=utf-8"
+            )
+
         if output.function_call:
-            return {
-                "function_call": {
-                    "name":      output.function_call.name,
-                    "arguments": output.function_call.arguments
-                }
-            }
-        return {"response": "No se pudo procesar la respuesta"}
+            return JSONResponse(
+                content={
+                    "function_call": {
+                        "name":      output.function_call.name,
+                        "arguments": output.function_call.arguments
+                    }
+                },
+                media_type="application/json; charset=utf-8"
+            )
+
+        return JSONResponse(
+            content={"response": "No se pudo procesar la respuesta"},
+            media_type="application/json; charset=utf-8"
+        )
+
     except Exception as e:
         logger.error("Error en /chat:", exc_info=True)
-        return {"error": str(e)}
+        return JSONResponse(
+            content={"error": str(e)},
+            media_type="application/json; charset=utf-8"
+        )
