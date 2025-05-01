@@ -60,35 +60,32 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Vector store para File Search
-file_search_tool = {
-    "type": "file_search",
-    "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
-}
-
-# Definición de la función
-function_tool = {
-    "type": "function",
-    "function": {
-        "name": "recolectarInformacionContacto",
-        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "nombre": {"type": "string", "description": "Nombre del lead."},
-                "apellidos": {"type": "string", "description": "Apellidos del lead."},
-                "email": {"type": "string", "description": "Correo electrónico del lead."},
-                "telefono": {"type": "string", "description": "Número de teléfono del lead."},
-                "pais": {"type": "string", "description": "País de residencia del lead."},
-                "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
-            },
-            "required": ["nombre", "email", "mensaje"]
+# Configuración de tools
+tools = [
+    {
+        "type": "file_search",
+        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "recolectarInformacionContacto",
+            "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre": {"type": "string", "description": "Nombre del lead."},
+                    "apellidos": {"type": "string", "description": "Apellidos del lead."},
+                    "email": {"type": "string", "description": "Correo electrónico del lead."},
+                    "telefono": {"type": "string", "description": "Número de teléfono del lead."},
+                    "pais": {"type": "string", "description": "País de residencia del lead."},
+                    "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
+                },
+                "required": ["nombre", "email", "mensaje"]
+            }
         }
     }
-}
-
-# Combinamos todas las herramientas en un solo array
-tools = [file_search_tool, function_tool]
+]
 
 @app.get("/chat")
 async def chat(query: str):
@@ -102,14 +99,18 @@ async def chat(query: str):
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
-            tools=tools  # Solo usamos tools, no functions
+            tools=tools
         )
         
+        logger.info(f"Respuesta recibida")
         output = response.output[0]
+        
         if hasattr(output, 'content') and output.content:
             text = output.content[0].text
+            logger.info(f"Respuesta de texto generada")
             return {"response": text}
         elif hasattr(output, 'function_call'):
+            logger.info(f"Llamada a función detectada: {output.function_call.name}")
             return {
                 "function_call": {
                     "name": output.function_call.name,
@@ -117,6 +118,7 @@ async def chat(query: str):
                 }
             }
         else:
+            logger.warning("No se encontró contenido en la respuesta")
             return {"response": "No se pudo procesar la respuesta"}
     except Exception as e:
         logger.error(f"Error: {str(e)}", exc_info=True)
