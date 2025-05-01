@@ -3,11 +3,9 @@ import logging
 from fastapi import FastAPI
 from openai import OpenAI
 
-# Configurar logging para mejor diagnóstico
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configuración de logging y cliente
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Inicializar cliente de OpenAI y FastAPI
 openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 app = FastAPI()
 
@@ -62,58 +60,56 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Configuración del vector store
-tools = [{
+# Vector store para File Search
+file_search_tool = {
     "type": "file_search",
     "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
-}]
+}
 
 # Definición de la función
-functions = [{
-    "name": "recolectarInformacionContacto",
-    "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
-    "strict": False,
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "nombre": {"type": "string", "description": "Nombre del lead."},
-            "apellidos": {"type": "string", "description": "Apellidos del lead."},
-            "email": {"type": "string", "description": "Correo electrónico del lead."},
-            "telefono": {"type": "string", "description": "Número de teléfono del lead, incluyendo código de país si es posible."},
-            "pais": {"type": "string", "description": "País de residencia del lead."},
-            "mensaje": {"type": "string", "description": "Breve descripción de los servicios que el lead necesita."}
-        },
-        "required": ["nombre", "email", "mensaje"]
+function_tool = {
+    "type": "function",
+    "function": {
+        "name": "recolectarInformacionContacto",
+        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del lead."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead."},
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead."},
+                "pais": {"type": "string", "description": "País de residencia del lead."},
+                "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
+            },
+            "required": ["nombre", "email", "mensaje"]
+        }
     }
-}]
+}
+
+# Combinamos todas las herramientas en un solo array
+tools = [file_search_tool, function_tool]
 
 @app.get("/chat")
 async def chat(query: str):
-    logger.info(f"Recibida consulta: {query}")
+    logger.info(f"Query recibida: {query}")
     try:
-        # Construir mensajes
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": query}
         ]
         
-        # CORRECCIÓN: Usar input=messages en lugar de messages=messages
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
-            tools=tools,
-            functions=functions
+            tools=tools  # Solo usamos tools, no functions
         )
         
-        logger.info("Respuesta recibida de OpenAI")
         output = response.output[0]
-        
-        if output.content:
+        if hasattr(output, 'content') and output.content:
             text = output.content[0].text
-            logger.info(f"Respuesta de texto: {text[:50]}...")
             return {"response": text}
-        elif output.function_call:
-            logger.info(f"Llamada a función: {output.function_call.name}")
+        elif hasattr(output, 'function_call'):
             return {
                 "function_call": {
                     "name": output.function_call.name,
@@ -121,8 +117,7 @@ async def chat(query: str):
                 }
             }
         else:
-            logger.warning("No se obtuvo contenido ni llamada a función")
-            return {"response": "Lo siento, ocurrió un error al procesar tu consulta"}
+            return {"response": "No se pudo procesar la respuesta"}
     except Exception as e:
-        logger.error(f"Error en procesamiento: {str(e)}", exc_info=True)
+        logger.error(f"Error: {str(e)}", exc_info=True)
         return {"error": str(e)}
