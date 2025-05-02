@@ -64,15 +64,14 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Definición de tools (CORREGIDA la sintaxis faltante de {} y ,)
+# Definición de tools (CON vector_store_ids DESCOMENTADO)
 tools = [
-    { # Falta el { de apertura del diccionario
+    {
         "type": "file_search",
-        # "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"] # Descomenta si lo necesitas
-    }, # Falta la , para separar elementos de la lista
-    { # Falta el { de apertura del diccionario
+        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"] # <-- ¡CORREGIDO Y DESCOMENTADO!
+    },
+    {
         "type": "function",
-        # <<< LA DEFINICIÓN DE LA FUNCIÓN DEBE ESTAR DENTRO DE UN OBJETO "function" >>>
         "function": {
             "name": "recolectarInformacionContacto",
             "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
@@ -88,8 +87,8 @@ tools = [
                 },
                 "required": ["nombre", "email", "mensaje"]
             }
-        } # Cierre del objeto "function"
-    } # Cierre del diccionario de la herramienta función
+        }
+    }
 ]
 
 @app.post("/chat")
@@ -114,49 +113,53 @@ async def chat(request: ChatRequest = Body(...)):
         for output in response.output:
             # Si es texto generado
             if hasattr(output, "content") and output.content:
-                # Asumiendo que content es una lista y quieres el primer elemento de texto
                 if hasattr(output.content[0], 'text'):
-                     results.append({"response": output.content[0].text})
+                    results.append({"response": output.content[0].text})
             # Si es llamada a función
             elif hasattr(output, "function_call"):
                 results.append({
                     "function_call": {
                         "name": output.function_call.name,
-                        "arguments": output.function_call.arguments # Puede ser un string JSON que necesites parsear
+                        "arguments": output.function_call.arguments
                     }
                 })
             # Si es file_search
             elif hasattr(output, "file_search_call"):
-                # Asegúrate de que la estructura de file_search_call sea la que esperas
                 file_results = getattr(output.file_search_call, "results", [])
                 results.append({
                     "file_search_results": [
                         {
-                            "text": getattr(res, 'text', ''), # Acceso más seguro a atributos
+                            "text": getattr(res, 'text', ''),
                             "file_id": getattr(res, 'file_id', '')
                         } for res in file_results
                     ]
                 })
 
         if not results:
-             logger.warning("No se generaron resultados válidos desde la API.")
-             return JSONResponse(
-                 content={"response": "No se pudo procesar la respuesta adecuadamente."},
-                 media_type="application/json; charset=utf-8"
-             )
+            logger.warning("No se generaron resultados válidos desde la API.")
+            return JSONResponse(
+                content={"response": "No se pudo procesar la respuesta adecuadamente."}, # Ajuste aquí si quieres que la clave externa sea 'error' en lugar de 'response'
+                media_type="application/json; charset=utf-8"
+            )
 
         # Si solo hay una respuesta, devuélvela directo
         if len(results) == 1:
             return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
         # Si hay varias (texto + file_search), devuélvelas todas
         else:
+            # Considera cómo quieres estructurar múltiples resultados. ¿Un array? ¿Un objeto con claves?
+            # Devolver solo el primer resultado podría ser más simple para Botpress.
+            # return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
+            # O devolver un array de resultados:
             return JSONResponse(content={"results": results}, media_type="application/json; charset=utf-8")
+
 
     except Exception as e:
         logger.error(f"Error en /chat: {e}", exc_info=True) # Loguea el traceback
         # Devuelve un error 500 genérico
         return JSONResponse(
             status_code=500,
+            # Ajustado para devolver {"error": "mensaje"} en lugar de {"response": {"error": "mensaje"}}
             content={"error": "Ocurrió un error interno procesando la solicitud."},
             media_type="application/json; charset=utf-8"
         )
