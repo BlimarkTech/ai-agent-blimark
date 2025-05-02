@@ -13,28 +13,31 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Cliente OpenAI
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Asegúrate de que la variable de entorno OPENAI_API_KEY esté configurada en Render
+openai_api_key = os.getenv("OPENAI_API_KEY")
+if not openai_api_key:
+    logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
+    # Considera lanzar un error o manejar esto de forma adecuada si la key es esencial
+openai_client = AsyncOpenAI(api_key=openai_api_key)
 
 app = FastAPI()
 
-# --- MODIFICACIÓN CORS ---
-# Habilitar CORS para permitir solicitudes desde cualquier origen durante las pruebas
+# --- CORS Middleware (Correcto) ---
 origins = ["*"] # Permite todos los orígenes para probar
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=False, # Debe ser False si allow_origins es ["*"]
-    allow_methods=["*"],    # Permite POST y también OPTIONS (preflight)
-    allow_headers=["*"],    # Permite todas las cabeceras
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# --- FIN MODIFICACIÓN CORS ---
+# --- FIN CORS Middleware ---
 
 # Modelo para la solicitud POST
 class ChatRequest(BaseModel):
     query: str
 
-# Instrucciones del sistema (Se mantiene tu versión)
+# Instrucciones del sistema (Completo y Correcto)
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
 - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
@@ -53,9 +56,12 @@ SYSTEM_MESSAGE = """
 - Si el usuario solicita información sobre servicios o precios, consulta el vector store antes de responder.
 - Si no encuentras información sobre un servicio o precio específico, informa al usuario que no dispones de esa información en este momento y sugiérele agendar una reunión con uno de nuestros expertos para recibir asistencia personalizada.
 5. **Programación de reuniones:**
-*(…misma estructura que antes…)*
+- Si el usuario expresa interés en programar una reunión, utiliza la función `recolectarInformacionContacto` para obtener sus datos.
+- Confirma los datos con el usuario antes de finalizar.
+- Si falta información obligatoria (nombre, email, mensaje), pídesela amablemente.
 6. **Resolución de dudas:**
-*(…misma estructura que antes…)*
+- Responde preguntas sobre *Blimark Tech* usando la información del vector store.
+- Si no encuentras la respuesta, indica que no tienes esa información y ofrece agendar una reunión.
 **Restricciones:**
 - Usa exclusivamente el vector store para URLs, servicios, precios y datos de contacto.
 - No inventes información ni muestres metadatos internos.
@@ -64,32 +70,32 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Definición de tools (CON vector_store_ids DESCOMENTADO)
+# --- Definición de tools (ESTRUCTURA CORREGIDA Y AJUSTADA PARA RESPONSES API) ---
 tools = [
-    {
+    { # Herramienta 0: File Search
         "type": "file_search",
-        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"] # <-- ¡CORREGIDO Y DESCOMENTADO!
-    },
-    {
+        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
+    }, # Coma separadora
+    { # Herramienta 1: Function (Estructura ajustada según error anterior)
         "type": "function",
-        "function": {
-            "name": "recolectarInformacionContacto",
-            "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nombre": {"type": "string", "description": "Nombre del lead."},
-                    "apellidos": {"type": "string", "description": "Apellidos del lead."},
-                    "email": {"type": "string", "description": "Correo electrónico del lead."},
-                    "telefono": {"type": "string", "description": "Número de teléfono del lead."},
-                    "pais": {"type": "string", "description": "País de residencia del lead."},
-                    "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
-                },
-                "required": ["nombre", "email", "mensaje"]
-            }
+        "name": "recolectarInformacionContacto", # <-- Nombre directamente aquí
+        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.", # <-- Descripción directamente aquí
+        "parameters": { # <-- Parámetros directamente aquí
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del lead."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead."},
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead."},
+                "pais": {"type": "string", "description": "País de residencia del lead."},
+                "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
+            },
+            "required": ["nombre", "email", "mensaje"]
         }
-    }
-]
+    } # Cierre del diccionario de la herramienta 1
+] # Cierre de la lista tools
+# --- FIN Definición de tools ---
+
 
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
@@ -98,24 +104,21 @@ async def chat(request: ChatRequest = Body(...)):
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
             {"role": "user", "content": request.query}
-        ]
+        ] # Cierre de la lista messages
 
-        # <<< SE MANTIENE TU LLAMADA A LA RESPONSES API >>>
+        # <<< Llamada a Responses API (Se mantiene) >>>
         response = await openai_client.responses.create(
-            model="gpt-4.1", # Asegúrate que este modelo sea compatible con Responses API o usa uno recomendado como gpt-4o / gpt-4-turbo
+            model="gpt-4.1", # Revisa compatibilidad o usa gpt-4o / gpt-4-turbo
             input=messages,
             tools=tools,
-            # include=["file_search_call.results"] # Verifica si este parámetro es válido en Responses API
         )
 
         results = []
-        # <<< SE MANTIENE TU LÓGICA PARA PROCESAR response.output >>>
+        # <<< Procesamiento de response.output (Se mantiene) >>>
         for output in response.output:
-            # Si es texto generado
             if hasattr(output, "content") and output.content:
                 if hasattr(output.content[0], 'text'):
                     results.append({"response": output.content[0].text})
-            # Si es llamada a función
             elif hasattr(output, "function_call"):
                 results.append({
                     "function_call": {
@@ -123,48 +126,41 @@ async def chat(request: ChatRequest = Body(...)):
                         "arguments": output.function_call.arguments
                     }
                 })
-            # Si es file_search
             elif hasattr(output, "file_search_call"):
                 file_results = getattr(output.file_search_call, "results", [])
                 results.append({
                     "file_search_results": [
-                        {
+                        { # Apertura del diccionario del resultado
                             "text": getattr(res, 'text', ''),
                             "file_id": getattr(res, 'file_id', '')
-                        } for res in file_results
-                    ]
+                        } # Cierre del diccionario del resultado
+                        for res in file_results
+                    ] # Cierre de la lista de resultados
                 })
 
         if not results:
             logger.warning("No se generaron resultados válidos desde la API.")
             return JSONResponse(
-                content={"response": "No se pudo procesar la respuesta adecuadamente."}, # Ajuste aquí si quieres que la clave externa sea 'error' en lugar de 'response'
+                status_code=500,
+                content={"error": "No se pudo procesar la respuesta adecuadamente."},
                 media_type="application/json; charset=utf-8"
             )
 
-        # Si solo hay una respuesta, devuélvela directo
-        if len(results) == 1:
-            return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
-        # Si hay varias (texto + file_search), devuélvelas todas
-        else:
-            # Considera cómo quieres estructurar múltiples resultados. ¿Un array? ¿Un objeto con claves?
-            # Devolver solo el primer resultado podría ser más simple para Botpress.
-            # return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
-            # O devolver un array de resultados:
-            return JSONResponse(content={"results": results}, media_type="application/json; charset=utf-8")
-
+        # Devuelve el primer resultado (o ajusta si necesitas manejar múltiples)
+        return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
 
     except Exception as e:
-        logger.error(f"Error en /chat: {e}", exc_info=True) # Loguea el traceback
-        # Devuelve un error 500 genérico
+        # Loguea el error detallado en Render
+        logger.error(f"Error en /chat endpoint: {e}", exc_info=True)
+        # Devuelve un error 500 genérico y consistente al cliente (Botpress)
         return JSONResponse(
             status_code=500,
-            # Ajustado para devolver {"error": "mensaje"} en lugar de {"response": {"error": "mensaje"}}
             content={"error": "Ocurrió un error interno procesando la solicitud."},
             media_type="application/json; charset=utf-8"
         )
 
-# Para ejecutar localmente (opcional)
+# Ejecución local (opcional)
 # if __name__ == "__main__":
 #     import uvicorn
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
+
