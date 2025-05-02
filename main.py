@@ -18,7 +18,7 @@ app = FastAPI()
 # Habilitar CORS para integración web
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Cambia a tu dominio en producción
+    allow_origins=["https://blimark.tech"],  # Cambia a tu dominio en producción
     allow_methods=["POST"],
     allow_headers=["*"]
 )
