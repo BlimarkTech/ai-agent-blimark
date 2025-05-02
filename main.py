@@ -57,7 +57,7 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# Definición de tools
+# Definición de tools (sintaxis corregida)
 tools = [
     {
         "type": "file_search",
