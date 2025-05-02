@@ -1,47 +1,66 @@
 import os
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from openai import AsyncOpenAI
 
+# Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Configuración de OpenAI
 openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# Inicialización de FastAPI
 app = FastAPI()
+
+# Configuración CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # En producción, cambiar por tu dominio específico
+    allow_methods=["POST"],
+    allow_headers=["*"]
+)
+
+# Modelo Pydantic para la solicitud
+class ChatRequest(BaseModel):
+    query: str
 
 # Instrucciones de sistema
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
-   - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
-   - *Blimark Tech* es una Agencia que presta servicios de Inteligencia Artificial aplicada al Marketing.
-   - Tu objetivo principal es captar leads y programar reuniones con potenciales clientes.
+- Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
+- *Blimark Tech* es una Agencia que presta servicios de Inteligencia Artificial aplicada al Marketing.
+- Tu objetivo principal es captar leads y programar reuniones con potenciales clientes.
 
 2. **Saludo, presentación y flujo de conversación:**
-   - Saluda al usuario con amabilidad, dale una cordial bienvenida y agradécele por ponerse en contacto con nosotros.
-   - Preséntate como Agente de *Blimark Tech* y pregúntale en qué podemos ayudarle hoy.
-   - Responde a todas las consultas del usuario en frases claras y concretas.
-   - Nunca respondas preguntas o consultas que no tengan que ver con los servicios que ofrece *Blimark Tech*. Responde que no puedes ayudar con eso.
+- Saluda al usuario con amabilidad, dale una cordial bienvenida y agradécele por ponerse en contacto con nosotros.
+- Preséntate como Agente de *Blimark Tech* y pregúntale en qué podemos ayudarle hoy.
+- Responde a todas las consultas del usuario en frases claras y concretas.
+- Nunca respondas preguntas o consultas que no tengan que ver con los servicios que ofrece *Blimark Tech*. Responde que no puedes ayudar con eso.
 
 3. **Consulta de datos de contacto:**
-   - Siempre que el usuario desee saber cómo ponerse en contacto con la empresa o hablar con un agente humano, consulta los datos de contacto en el vector store.
-   - Proporciónalos directamente al usuario.
+- Siempre que el usuario desee saber cómo ponerse en contacto con la empresa o hablar con un agente humano, consulta los datos de contacto en el vector store.
+- Proporciónalos directamente al usuario.
 
 4. **Consulta de servicios y precios:**
-   - Obtén la información sobre servicios, productos, precios y ofertas únicamente del vector store.
-   - Si el usuario solicita información sobre servicios o precios, consulta el vector store antes de responder.
-   - Si no encuentras información sobre un servicio o precio específico, informa al usuario que no dispones de esa información en este momento y sugiérele agendar una reunión con uno de nuestros expertos para recibir asistencia personalizada.
+- Obtén la información sobre servicios, productos, precios y ofertas únicamente del vector store.
+- Si el usuario solicita información sobre servicios o precios, consulta el vector store antes de responder.
+- Si no encuentras información sobre un servicio o precio específico, informa al usuario que no dispones de esa información en este momento y sugiérele agendar una reunión con uno de nuestros expertos para recibir asistencia personalizada.
 
-5. **Programación de reuniones:**  
-   *(…misma estructura que antes…)*
+5. **Programación de reuniones:**
+... (mantener misma estructura original) ...
 
-6. **Resolución de dudas:**  
-   *(…misma estructura que antes…)*
+6. **Resolución de dudas:**
+... (mantener misma estructura original) ...
 
-**Restricciones:**  
-- Usa exclusivamente el vector store para URLs, servicios, precios y datos de contacto.  
-- No inventes información ni muestres metadatos internos.  
-- No respondas preguntas ajenas a *Blimark Tech*.  
-- Mantén respuestas en máximo 500 caracteres.  
+**Restricciones:**
+- Usa exclusivamente el vector store para URLs, servicios, precios y datos de contacto.
+- No inventes información ni muestres metadatos internos.
+- No respondas preguntas ajenas a *Blimark Tech*.
+- Mantén respuestas en máximo 500 caracteres.
 - Sé transparente sobre tus límites.
 """
 
@@ -58,39 +77,38 @@ tools = [
         "parameters": {
             "type": "object",
             "properties": {
-                "nombre":    {"type": "string", "description": "Nombre del lead."},
+                "nombre": {"type": "string", "description": "Nombre del lead."},
                 "apellidos": {"type": "string", "description": "Apellidos del lead."},
-                "email":     {"type": "string", "description": "Correo electrónico del lead."},
-                "telefono":  {"type": "string", "description": "Número de teléfono del lead."},
-                "pais":      {"type": "string", "description": "País de residencia del lead."},
-                "mensaje":   {"type": "string", "description": "Breve descripción de los servicios."}
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead."},
+                "pais": {"type": "string", "description": "País de residencia del lead."},
+                "mensaje": {"type": "string", "description": "Breve descripción de los servicios."}
             },
             "required": ["nombre", "email", "mensaje"]
         }
     }
 ]
 
-@app.get("/chat")
-async def chat(query: str):
-    logger.info(f"Query recibida: {query}")
+@app.post("/chat")
+async def chat(request: ChatRequest = Body(...)):
+    logger.info(f"Query recibida: {request.query}")
     try:
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE},
-            {"role": "user",   "content": query}
+            {"role": "user", "content": request.query}
         ]
+
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
             tools=tools,
-            include=["file_search_call.results"]  # Para obtener resultados del file search
+            include=["file_search_call.results"]
         )
 
         results = []
         for output in response.output:
-            # Si es texto generado
             if hasattr(output, "content") and output.content:
                 results.append({"response": output.content[0].text})
-            # Si es llamada a función
             elif hasattr(output, "function_call"):
                 results.append({
                     "function_call": {
@@ -98,9 +116,7 @@ async def chat(query: str):
                         "arguments": output.function_call.arguments
                     }
                 })
-            # Si es file_search
             elif hasattr(output, "file_search_call"):
-                # Extrae resultados si los hay
                 file_results = getattr(output.file_search_call, "results", [])
                 results.append({
                     "file_search_results": [
@@ -110,16 +126,21 @@ async def chat(query: str):
                         } for res in file_results
                     ]
                 })
+
         if not results:
             return JSONResponse(
                 content={"response": "No se pudo procesar la respuesta"},
                 media_type="application/json; charset=utf-8"
             )
-        # Si solo hay una respuesta, devuélvela directo
-        if len(results) == 1:
-            return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
-        # Si hay varias (texto + file_search), devuélvelas todas
-        return JSONResponse(content={"results": results}, media_type="application/json; charset=utf-8")
+
+        return JSONResponse(
+            content=results[0] if len(results) == 1 else {"results": results},
+            media_type="application/json; charset=utf-8"
+        )
+
     except Exception as e:
         logger.error("Error en /chat:", exc_info=True)
-        return JSONResponse(content={"error": str(e)}, media_type="application/json; charset=utf-8")
+        return JSONResponse(
+            content={"error": str(e)},
+            media_type="application/json; charset=utf-8"
+        )
