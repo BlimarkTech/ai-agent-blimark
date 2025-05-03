@@ -127,6 +127,9 @@ tools = [
     }
 ]
 
+# ----------------------------
+# Webhook externo para leads
+# ----------------------------
 WEBHOOK_URL = os.getenv(
     "WEBHOOK_URL",
     "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9"
@@ -142,17 +145,15 @@ async def handle_function_call(function_call):
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
-        if WEBHOOK_URL:
-            resp = requests.post(WEBHOOK_URL, json=args)
-            resp.raise_for_status()
-            return {"success": True, "status_code": resp.status_code}
-        return {"success": True, "status_code": 200}
+        response = requests.post(WEBHOOK_URL, json=args)
+        response.raise_for_status()
+        return {"success": True, "status_code": response.status_code}
     except Exception as e:
         logger.error(f"Error en handle_function_call: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# Generador de fallback si falta texto tras FC
+# Generador de fallback post-función
 # ----------------------------
 def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
     if result.get("success"):
@@ -160,8 +161,8 @@ def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
             name = json.loads(fc_msg.arguments).get("nombre", "")
         except:
             name = ""
-        greeting = f"¡Muchas gracias por tus datos, {name}!" if name else "¡Muchas gracias por tus datos!"
-        return f"{greeting} Puedes agendar tu reunión aquí: [MEETING_URL]"
+        saludo = f"¡Muchas gracias por tus datos, {name}!" if name else "¡Muchas gracias por tus datos!"
+        return f"{saludo} Puedes agendar tu reunión aquí: [MEETING_URL]"
     return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
 
 # ----------------------------
@@ -169,66 +170,59 @@ def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
 # ----------------------------
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
-    logger.info(f"Historial recibido: {request.history}")
-    if not request.history:
-        return JSONResponse(status_code=400, content={"error": "No se recibió historial de conversación."})
+    history = request.history or []
+    logger.info(f"Historial recibido: {history}")
 
-    # Armar mensajes de entrada
-    current_messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + request.history
-    if len(current_messages) > 201:
-        current_messages = [current_messages[0]] + current_messages[-200:]
+    # Construir mensajes de entrada
+    messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + history
+    if len(messages) > 201:
+        messages = [messages[0]] + messages[-200:]
 
     try:
-        # Primera llamada a OpenAI
+        # Primera llamada a la Responses API
         logger.info("Realizando primera llamada a OpenAI...")
-        response = await openai_client.responses.create(
+        response1 = await openai_client.responses.create(
             model="gpt-4.1",
-            input=current_messages,
+            input=messages,
             tools=tools
         )
-        logger.info(f"Output primera llamada: {response.output}")
+        logger.info(f"Output primera llamada: {response1.output}")
 
-        # Detectar función o texto
+        # Detectar function_call o texto normal
         detected_fc = None
         initial_text = ""
-        for item in response.output:
-            # Nuevo: detectar ResponseFunctionToolCall por su tipo
+        for item in response1.output:
             if getattr(item, "type", "") == "function_call":
                 detected_fc = item
                 break
-            # Capturar todo el texto de salida
             if getattr(item, "content", None):
                 for chunk in item.content:
-                    if hasattr(chunk, "text"):
-                        initial_text += chunk.text
+                    initial_text += getattr(chunk, "text", "")
 
         # Si hay llamada a función
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
             fc_result = await handle_function_call(detected_fc)
 
-            # Segunda llamada a OpenAI con resultado de la función
-            messages2 = list(current_messages)
-            # 1) Mensaje de función
-            messages2.append({
+            # Reinsertar mensajes en el contexto
+            messages.append({
                 "role": "assistant",
                 "function_call": {
                     "name": detected_fc.name,
-                    "arguments": detected_fc.arguments,
-                    "call_id": detected_fc.call_id
+                    "arguments": detected_fc.arguments
                 }
             })
-            # 2) Resultado de la función
-            messages2.append({
-                "type": "function_call_output",
-                "call_id": detected_fc.call_id,
-                "output": json.dumps(fc_result)
+            messages.append({
+                "role": "function",
+                "name": detected_fc.name,
+                "content": json.dumps(fc_result)
             })
 
+            # Segunda llamada a la Responses API
             logger.info("Realizando segunda llamada a OpenAI...")
             response2 = await openai_client.responses.create(
                 model="gpt-4.1",
-                input=messages2,
+                input=messages,
                 tools=tools
             )
             logger.info(f"Output segunda llamada: {response2.output}")
@@ -238,11 +232,12 @@ async def chat(request: ChatRequest = Body(...)):
             for out in response2.output:
                 if getattr(out, "content", None):
                     for chunk in out.content:
-                        if hasattr(chunk, "text"):
-                            final_text += chunk.text
+                        final_text += getattr(chunk, "text", "")
             if not final_text:
                 final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
+
         else:
+            # Sólo texto sin función
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
 
         # Reemplazar placeholder
@@ -256,11 +251,12 @@ async def chat(request: ChatRequest = Body(...)):
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
         return JSONResponse(status_code=400, content={"error": str(e)})
+
     except Exception as e:
         logger.error(f"Error en /chat: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Error interno inesperado."})
 
-# Uncomment to run locally
+# Descomenta para ejecutar localmente con uvicorn
 # if __name__ == "__main__":
 #     import uvicorn
 #     port = int(os.getenv("PORT", 8000))
