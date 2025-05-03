@@ -38,7 +38,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     history: list  # Recibe el historial completo de mensajes
 
-# Instrucciones del sistema (optimizadas y reforzadas)
+# Instrucciones del sistema
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
    - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
