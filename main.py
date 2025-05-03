@@ -211,10 +211,9 @@ async def chat(request: ChatRequest = Body(...)):
             })
     
             messages.append({
-                "role": "tool",
-                "content": json.dumps(fc_result),
-                "tool_call_id": detected_fc.call_id,
-                "name": detected_fc.name
+                "role": "function",
+                "name": detected_fc.name,
+                "content": json.dumps(fc_result)
             })
 
             # Segunda llamada a la Responses API
