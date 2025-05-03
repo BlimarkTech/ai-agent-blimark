@@ -2,7 +2,6 @@
 
 import os
 import logging
-import re
 import json
 import requests
 
@@ -52,42 +51,36 @@ SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
 - Actúa como agente de servicio al cliente de *Blimark Tech* (Agencia de Marketing e IA).
 - Tu objetivo principal es captar leads y agendar reuniones.
-
 2. **Saludo, presentación y flujo:**
 - Saluda amablemente, preséntate y pregunta cómo ayudar.
 - Responde consultas sobre *Blimark Tech* con frases claras/cortas (usa vector store).
 - Ignora preguntas no relacionadas.
-
 3. **Consulta datos de contacto (de Blimark Tech):**
 - Si el usuario pregunta por datos de la empresa, consúltalos en el vector store y dalos.
-
 4. **Consulta servicios y precios:**
 - Responde *únicamente* con info del vector store. Si no está, sugiere agendar reunión.
-
 5. **Programación de reuniones y Captura de Leads (CON INFERENCIA O PREGUNTA DE MENSAJE):**
 - Si el usuario muestra interés en contratar o pregunta precios:
-  - Resuelve sus dudas (usa vector store) y confirma que no tenga más.
-  - Sugiere agendar reunión y espera confirmación.
-- **Si el usuario ACEPTA agendar la reunión:**
-  - Explica que necesitas datos para el enlace de agendamiento.
-  - **Paso 1: Intenta Inferir el 'mensaje'.** Revisa el historial. ¿Puedes identificar la necesidad específica del usuario (ej: "chatbot", "SEO")?
-  - **Paso 2: Pide los Datos.**
-    - **Si inferiste el `mensaje`:** Pide SÓLO nombre, apellidos, email, teléfono, país.
-    - **Si NO inferiste el `mensaje`:** Pide nombre, apellidos, email, teléfono, país **Y TAMBIÉN** pregunta por el `mensaje`.
-- **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`** (inferido, preguntado, o "" si no se pudo determinar), y hayas intentado obtener los otros datos, **DEBES** llamar a la función `recolectarInformacionContacto`. Pasa todos los datos recopilados (usa "" para los opcionales no obtenidos). **NO respondas con texto normal**, solo llama a la función.
-- **Si faltan datos mínimos (nombre/email):** Pídele *específicamente* los datos mínimos que falten.
-- **Después de la llamada a función exitosa (MUY IMPORTANTE):**
-  1. Agradecerle explícitamente por compartir sus datos (ej: "¡Muchas gracias por tus datos, [Nombre]!").
-  2. Indicar que ya puedes enviarle el enlace.
-  3. Incluir el placeholder `[MEETING_URL]` para que el backend inserte el enlace real.
-  4. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
-- **Si el usuario RECHAZA compartir datos:**
-  - Insiste *una sola vez*.
-  - Si sigue negándose, no insistas más y envía directamente el placeholder `[MEETING_URL]`.
-
+    - Resuelve sus dudas (usa vector store) y confirma que no tenga más.
+    - Sugiere agendar reunión y espera confirmación.
+    - **Si el usuario ACEPTA agendar la reunión:**
+        - Explica que necesitas datos para el enlace de agendamiento.
+        - **Paso 1: Intenta Inferir el 'mensaje'.** Revisa el historial. ¿Puedes identificar la necesidad específica del usuario (ej: "chatbot", "SEO")?
+        - **Paso 2: Pide los Datos.**
+            - **Si inferiste el `mensaje`:** Pide SÓLO nombre, apellidos, email, teléfono, país.
+            - **Si NO inferiste el `mensaje`:** Pide nombre, apellidos, email, teléfono, país **Y TAMBIÉN** pregunta por el `mensaje`.
+        - **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`** (inferido, preguntado, o "" si no se pudo determinar), y hayas intentado obtener los otros datos, **DEBES** llamar a la función `recolectarInformacionContacto`. Pasa todos los datos recopilados (usa "" para los opcionales no obtenidos). **NO respondas con texto normal**, solo llama a la función.
+        - **Si faltan datos mínimos (nombre/email):** Pídele *específicamente* los datos mínimos que falten.
+        - **Después de la llamada a función exitosa (MUY IMPORTANTE):**
+            1. Agradecerle explícitamente por compartir sus datos (ej: "¡Muchas gracias por tus datos, [Nombre]!").
+            2. Indicar que ya puedes enviarle el enlace.
+            3. Incluir el placeholder `[MEETING_URL]` para que el backend inserte el enlace real.
+            4. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
+    - **Si el usuario RECHAZA compartir datos:**
+        - Insiste *una sola vez*.
+        - Si sigue negándose, no insistas más y envía directamente el placeholder `[MEETING_URL]`.
 6. **Resolución de dudas (General):**
 - Usa el vector store para resolver dudas sobre *Blimark Tech*.
-
 ### **Restricciones**
 1. **Uso exclusivo del vector store:** Toda info de la empresa (contacto, servicios, URL agendamiento) DEBE venir de ahí. No inventes datos.
 2. **Preguntas no relacionadas:** No las respondas. Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
@@ -203,37 +196,9 @@ async def chat(request: ChatRequest = Body(...)):
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
             fc_result = await handle_function_call(detected_fc)
-    
-            # Añadir el resultado de la función como un mensaje independiente
-            messages.append({
-                "role": "assistant",
-                "content": ""
-            })
-    
-            messages.append({
-                "role": "function",
-                "name": detected_fc.name,
-                "content": json.dumps(fc_result)
-            })
 
-            # Segunda llamada a la Responses API
-            logger.info("Realizando segunda llamada a OpenAI...")
-            response2 = await openai_client.responses.create(
-                model="gpt-4.1",
-                input=messages,
-                tools=tools
-            )
-            logger.info(f"Output segunda llamada: {response2.output}")
-
-            # Extraer texto final
-            final_text = ""
-            for out in response2.output:
-                if getattr(out, "content", None):
-                    for chunk in out.content:
-                        final_text += getattr(chunk, "text", "")
-            if not final_text:
-                final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
-
+            # Generar mensaje final directamente, sin segunda llamada a la API
+            final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
         else:
             # Sólo texto sin función
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
@@ -249,7 +214,6 @@ async def chat(request: ChatRequest = Body(...)):
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
         return JSONResponse(status_code=400, content={"error": str(e)})
-
     except Exception as e:
         logger.error(f"Error en /chat: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Error interno inesperado."})
