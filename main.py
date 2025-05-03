@@ -72,9 +72,10 @@ SYSTEM_MESSAGE = """
         - **Condición para llamar a la función:** Tan pronto como tengas los datos del usuario y el **`mensaje`** (inferido, preguntado, o "" si no se pudo determinar), **DEBES** llamar a la función `recolectarInformacionContacto`. Pasa todos los datos recopilados (usa "" para los datos opcionales no obtenidos). **NO respondas con texto normal**, solo llama a la función.
         - **Si faltan datos:** Pídele amablemente al usuario *específicamente* los datos que falten y una vez obtenidos llama a la función.
         - **Después de la llamada a función exitosa (MUY IMPORTANTE):**
-            1. Agradecerle explícitamente por compartir sus datos.
-            2. Indicar que ya puedes enviarle el enlace.
-            3. Incluir el placeholder `[Agendar Cita]` para que el backend inserte el enlace real para el agendamiento de reuniones obtenido del vector store.
+            1. Agradece explícitamente al usuario por compartir sus datos.
+            2. Indica que ya puedes enviarle el enlace.
+            3. Incluye el enlace real de agendamiento de reuniones, recuperado del vector store, en tu respuesta final al usuario.
+            4. Si usas un placeholder en la respuesta final acompáñalo del enlace real; solo entrega el enlace real si lo encuentras en el vector store. Si no lo encuentras, indícalo con transparencia.
             4. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones del vector store.
             5. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
     - **Si el usuario RECHAZA compartir datos:**
@@ -161,7 +162,7 @@ def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
         except:
             name = ""
         saludo = f"¡Muchas gracias, {name}! Hemos recibido tu información correctamente." if name else "¡Muchas gracias! Hemos recibido tu información correctamente."
-        return f"{saludo} Puedes agendar la reunión en la fecha y hora que prefieras aquí: [Agendar Cita]"
+        return saludo
     return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
 
 # ----------------------------
