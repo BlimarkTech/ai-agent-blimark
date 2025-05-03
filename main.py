@@ -195,9 +195,16 @@ async def chat(request: ChatRequest = Body(...)):
         # Si hay llamada a función
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
+            # Validar datos antes de exportar
+            args = json.loads(detected_fc.arguments)
+            campos_obligatorios = ["nombre", "email", "mensaje"]
+            faltan = [campo for campo in campos_obligatorios if not args.get(campo)]
+            if faltan:
+                texto = "Para agendar la reunión necesito: " + ", ".join(faltan) + ". ¿Podrías indicármelos?"
+                logger.info(f"Faltan datos: {faltan}. Solicitando al usuario.")
+                return JSONResponse(content={"response": texto}, media_type="application/json; charset=utf-8")
+            # Si tiene los datos, sigue el flujo normal
             fc_result = await handle_function_call(detected_fc)
-
-            # Generar mensaje final directamente, sin segunda llamada a la API
             final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
         else:
             # Sólo texto sin función
