@@ -2,6 +2,7 @@
 
 import os
 import logging
+import re
 import json
 import requests
 
@@ -9,7 +10,7 @@ from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import AsyncOpenAI, BadRequestError
+from openai import AsyncOpenAI, BadRequestError  # Importar BadRequestError
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
+    # Aquí podrías lanzar una excepción o detener la ejecución si lo deseas
 openai_client = AsyncOpenAI(api_key=openai_api_key)
 
 # FastAPI app y CORS
@@ -34,9 +36,9 @@ app.add_middleware(
 
 # Modelo para la solicitud POST
 class ChatRequest(BaseModel):
-    history: list  # Historial completo de mensajes
+    history: list  # Recibe el historial completo de mensajes
 
-# Instrucciones del sistema
+# Instrucciones del sistema con inferencia condicional de 'mensaje' y respuesta post-FC
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
 - Actúa como agente de servicio al cliente de *Blimark Tech* (Agencia de Marketing e IA).
@@ -56,31 +58,32 @@ SYSTEM_MESSAGE = """
 5. **Programación de reuniones y Captura de Leads (CON INFERENCIA O PREGUNTA DE MENSAJE):**
 - Si el usuario muestra interés en contratar o pregunta precios:
   - Resuelve sus dudas (usa vector store) y confirma que no tenga más.
-  - Sugiérele agendar reunión y espera confirmación.
+  - Sugiere agendar reunión y espera confirmación.
 - **Si el usuario ACEPTA agendar la reunión:**
   - Explica que necesitas datos para el enlace de agendamiento.
-  - **Paso 1: Intenta Inferir el 'Mensaje'.** Revisa el historial. ¿Puedes identificar la necesidad específica del usuario (ej: "chatbot", "SEO")?
+  - **Paso 1: Intenta Inferir el 'mensaje'.** Revisa el historial. ¿Puedes identificar la necesidad específica del usuario (ej: "chatbot", "SEO")?
   - **Paso 2: Pide los Datos.**
     - **Si inferiste el `mensaje`:** Pide SÓLO nombre, apellidos, email, teléfono, país.
     - **Si NO inferiste el `mensaje`:** Pide nombre, apellidos, email, teléfono, país **Y TAMBIÉN** pregunta por el `mensaje`.
-- **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`**, y hayas intentado obtener los otros datos, **DEBES** llamar a la función `recolectarInformacionContacto`. Pasa todos los datos (usa "" para opcionales no obtenidos). **NO respondas con texto normal**, solo llama a la función.
+- **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`** (inferido, preguntado, o "" si no se pudo determinar), y hayas intentado obtener los otros datos, **DEBES** llamar a la función `recolectarInformacionContacto`. Pasa todos los datos recopilados (usa "" para los opcionales no obtenidos). **NO respondas con texto normal**, solo llama a la función.
 - **Si faltan datos mínimos (nombre/email):** Pídele *específicamente* los datos mínimos que falten.
-- **Después de la llamada a función exitosa:**
-  1. Agradece explícitamente por compartir sus datos: "¡Muchas gracias por tus datos, [Nombre]!".
-  2. Indica que ya puedes enviarle el enlace.
-  3. Incluye el placeholder `[MEETING_URL]`.
-  4. NO hagas más preguntas en esta respuesta.
+- **Después de la llamada a función exitosa (MUY IMPORTANTE):**
+  1. Agradecerle explícitamente por compartir sus datos (ej: "¡Muchas gracias por tus datos, [Nombre]!").
+  2. Indicar que ya puedes enviarle el enlace.
+  3. Incluir el placeholder `[MEETING_URL]` para que el backend inserte el enlace real.
+  4. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
 - **Si el usuario RECHAZA compartir datos:**
-  - Insiste *una sola vez*. Si sigue negándose, muestra el placeholder `[MEETING_URL]`.
+  - Insiste *una sola vez*.
+  - Si sigue negándose, no insistas más y envía directamente el placeholder `[MEETING_URL]`.
 
 6. **Resolución de dudas (General):**
 - Usa el vector store para resolver dudas sobre *Blimark Tech*.
 
 ### **Restricciones**
-1. **Uso exclusivo del vector store:** Toda info de la empresa debe venir de ahí. No inventes datos.
-2. **Preguntas no relacionadas:** Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
-3. **Transparencia y límites:** Frases cortas (<500 caracteres).
-4. **Placeholder para enlace:** Usa siempre `[MEETING_URL]`.
+1. **Uso exclusivo del vector store:** Toda info de la empresa (contacto, servicios, URL agendamiento) DEBE venir de ahí. No inventes datos.
+2. **Preguntas no relacionadas:** No las respondas. Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
+3. **Transparencia y límites:** Usa frases cortas (<500 caracteres). Sé claro sobre lo que no sabes.
+4. **Placeholder para enlace:** Usa siempre `[MEETING_URL]` para el enlace de agendamiento en tu respuesta final al usuario.
 """
 
 # Definición de herramientas
@@ -94,18 +97,21 @@ tools = [
         "name": "recolectarInformacionContacto",
         "description": (
             "Recolecta información de contacto de un lead (nombre, apellidos, email, teléfono, país, mensaje) "
-            "y la envía a un webhook. Si algún campo opcional no está disponible, envía ''."
+            "y la envía a un webhook. Campos opcionales vacíos si no se proporcionan."
         ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "nombre": {"type": "string"},
-                "apellidos": {"type": "string"},
-                "email": {"type": "string"},
-                "telefono": {"type": "string"},
-                "pais": {"type": "string"},
-                "mensaje": {"type": "string"}
+                "nombre": {"type": "string", "description": "Nombre del lead."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead."},
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Teléfono del lead."},
+                "pais": {"type": "string", "description": "País de residencia."},
+                "mensaje": {
+                    "type": "string",
+                    "description": "Descripción de la necesidad (inferido o preguntado)."
+                }
             },
             "required": ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"],
             "additionalProperties": False
@@ -113,6 +119,7 @@ tools = [
     }
 ]
 
+# Webhook para leads
 WEBHOOK_URL = os.getenv(
     "WEBHOOK_URL",
     "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9"
@@ -126,25 +133,27 @@ async def handle_function_call(function_call):
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
+        logger.info(f"Arguments for webhook: {args}")
+        # Enviar al webhook
         if WEBHOOK_URL:
-            response = requests.post(WEBHOOK_URL, json=args)
-            response.raise_for_status()
-            return {"success": True, "status_code": response.status_code}
+            resp = requests.post(WEBHOOK_URL, json=args)
+            resp.raise_for_status()
+            return {"success": True, "status_code": resp.status_code}
         return {"success": True, "status_code": 200}
     except Exception as e:
         logger.error(f"Error en handle_function_call: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
-    """Genera mensaje si la segunda llamada no devuelve texto."""
+    """Genera mensaje de fallback si la segunda llamada no devuelve texto."""
     if result.get("success"):
         try:
             name = json.loads(fc_msg.arguments).get("nombre", "")
         except:
             name = ""
-        saludo = f"¡Muchas gracias por tus datos, {name}!" if name else "¡Muchas gracias por tus datos!"
-        return f"{saludo} Puedes agendar tu reunión aquí: [MEETING_URL]"
-    return "Lo siento, hubo un problema al procesar tu información. Por favor, inténtalo de nuevo."
+        greeting = f"¡Muchas gracias por tus datos, {name}!" if name else "¡Muchas gracias por tus datos!"
+        return f"{greeting} Puedes agendar tu reunión aquí: [MEETING_URL]"
+    return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
 
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
@@ -152,13 +161,14 @@ async def chat(request: ChatRequest = Body(...)):
     if not request.history:
         return JSONResponse(status_code=400, content={"error": "No se recibió historial de conversación."})
 
-    # Construir mensajes
+    # Construir mensajes para OpenAI
     current_messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + request.history
+    # Truncar si es muy largo
     if len(current_messages) > 201:
         current_messages = [current_messages[0]] + current_messages[-200:]
 
     try:
-        # Primera llamada a OpenAI
+        # Primera llamada
         logger.info("Realizando primera llamada a OpenAI...")
         response = await openai_client.responses.create(
             model="gpt-4.1",
@@ -167,22 +177,26 @@ async def chat(request: ChatRequest = Body(...)):
         )
         logger.info(f"Output primera llamada: {response.output}")
 
-        # Detectar función o texto inicial
+        # Procesar respuesta inicial
         detected_fc = None
         initial_text = ""
         for item in response.output:
-            if getattr(item, "type", "") == "function_call":
-                detected_fc = item
+            # Detectar llamada a función
+            if hasattr(item, "function_call") and item.function_call:
+                detected_fc = item.function_call
                 break
-            if getattr(item, "type", "") == "output_text":
-                initial_text += "".join(chunk.text for chunk in item.content)
+            # Capturar todo el texto
+            if getattr(item, "content", None):
+                for chunk in item.content:
+                    if hasattr(chunk, "text"):
+                        initial_text += chunk.text
 
-        # Si se detectó llamada a función
+        # Si se detectó función
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
             fc_result = await handle_function_call(detected_fc)
 
-            # Segunda llamada a OpenAI con resultado de la función
+            # Segunda llamada con resultado de función
             messages2 = list(current_messages)
             messages2.append({
                 "role": "assistant",
@@ -202,18 +216,21 @@ async def chat(request: ChatRequest = Body(...)):
                 input=messages2,
                 tools=tools
             )
+
             final_text = ""
-            for o in response2.output:
-                if getattr(o, "type", "") == "output_text":
-                    final_text += "".join(chunk.text for chunk in o.content)
+            for out in response2.output:
+                if getattr(out, "content", None):
+                    for chunk in out.content:
+                        if hasattr(chunk, "text"):
+                            final_text += chunk.text
             if not final_text:
                 final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
         else:
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
 
-        # Reemplazar placeholder con URL real
+        # Reemplazar placeholder con la URL real
         if "[MEETING_URL]" in final_text:
-            meeting_url = "https://calendly.com/tu-enlace-real"  # Ajusta aquí tu enlace real
+            meeting_url = "https://calendly.com/tu-enlace-real"  # Ajusta este enlace
             final_text = final_text.replace("[MEETING_URL]", meeting_url)
 
         logger.info(f"Respuesta final: {final_text}")
@@ -230,5 +247,11 @@ async def chat(request: ChatRequest = Body(...)):
         logger.error(f"Error grave en /chat: {e}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"error": "Error interno inesperado."}
+            content={"error": "Ocurrió un error interno inesperado procesando la solicitud."}
         )
+
+# Para ejecutar localmente con uvicorn, descomenta:
+# if __name__ == "__main__":
+#     import uvicorn
+#     port = int(os.getenv("PORT", 8000))
+#     uvicorn.run(app, host="0.0.0.0", port=port)
