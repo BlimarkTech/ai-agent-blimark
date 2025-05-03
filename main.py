@@ -126,7 +126,6 @@ async def chat(request: ChatRequest = Body(...)):
 
         # --- BUFFER DE 100 MENSAJES ---
         MAX_HISTORY = 100
-        # messages[0] es el system prompt, los demás son el historial
         if len(messages) > MAX_HISTORY + 1:
             messages = [messages[0]] + messages[-MAX_HISTORY:]
 
