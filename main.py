@@ -1,43 +1,42 @@
-# main.py
 import os
 import logging
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware # Asegúrate de que está importado
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AsyncOpenAI
-import json # Necesario si los argumentos de la función vienen como string JSON
+import json
+import requests
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Cliente OpenAI
-# Asegúrate de que la variable de entorno OPENAI_API_KEY esté configurada en Render
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
-    # Considera lanzar un error o manejar esto de forma adecuada si la key es esencial
+
 openai_client = AsyncOpenAI(api_key=openai_api_key)
 
 app = FastAPI()
 
-# --- CORS Middleware (Correcto) ---
-origins = ["*"] # Permite todos los orígenes para probar
+# --- CORS Middleware ---
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*"]
 )
 # --- FIN CORS Middleware ---
 
 # Modelo para la solicitud POST
 class ChatRequest(BaseModel):
-    query: str
+    history: list  # Ahora recibe el historial completo de mensajes
 
-# Instrucciones del sistema (Completo y Correcto)
+# Instrucciones del sistema
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
 - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
@@ -70,17 +69,17 @@ SYSTEM_MESSAGE = """
 - Sé transparente sobre tus límites.
 """
 
-# --- Definición de tools (ESTRUCTURA CORREGIDA Y AJUSTADA PARA RESPONSES API) ---
+# Definición de tools (ajustado para Responses API)
 tools = [
-    { # Herramienta 0: File Search
+    {
         "type": "file_search",
         "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
-    }, # Coma separadora
-    { # Herramienta 1: Function (Estructura ajustada según error anterior)
+    },
+    {
         "type": "function",
-        "name": "recolectarInformacionContacto", # <-- Nombre directamente aquí
-        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.", # <-- Descripción directamente aquí
-        "parameters": { # <-- Parámetros directamente aquí
+        "name": "recolectarInformacionContacto",
+        "description": "Recolecta información de contacto de un lead y un breve mensaje sobre sus necesidades.",
+        "parameters": {
             "type": "object",
             "properties": {
                 "nombre": {"type": "string", "description": "Nombre del lead."},
@@ -92,50 +91,61 @@ tools = [
             },
             "required": ["nombre", "email", "mensaje"]
         }
-    } # Cierre del diccionario de la herramienta 1
-] # Cierre de la lista tools
-# --- FIN Definición de tools ---
+    }
+]
 
+# Webhook para leads
+WEBHOOK_URL = "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9"
+
+async def handle_function_call(function_call):
+    try:
+        args = json.loads(function_call.arguments)
+        response = requests.post(WEBHOOK_URL, json=args)
+        result = {
+            "success": response.ok,
+            "status_code": response.status_code,
+            "response": response.text
+        }
+        return result
+    except Exception as e:
+        logger.error(f"Error enviando al webhook: {e}")
+        return {"success": False, "error": str(e)}
 
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
-    logger.info(f"Query recibida: {request.query}")
+    logger.info(f"Historial recibido: {request.history}")
     try:
         messages = [
-            {"role": "system", "content": SYSTEM_MESSAGE},
-            {"role": "user", "content": request.query}
-        ] # Cierre de la lista messages
+            {"role": "system", "content": SYSTEM_MESSAGE}
+        ]
+        # Agregar el historial recibido
+        if request.history:
+            messages.extend(request.history)
+        else:
+            return JSONResponse(status_code=400, content={"error": "No se recibió historial de conversación."})
 
-        # <<< Llamada a Responses API (Se mantiene) >>>
         response = await openai_client.responses.create(
-            model="gpt-4.1", # Revisa compatibilidad o usa gpt-4o / gpt-4-turbo
+            model="gpt-4.1",
             input=messages,
-            tools=tools,
+            tools=tools
         )
 
         results = []
-        # <<< Procesamiento de response.output (Se mantiene) >>>
         for output in response.output:
+            # Respuesta normal del modelo
             if hasattr(output, "content") and output.content:
                 if hasattr(output.content[0], 'text'):
                     results.append({"response": output.content[0].text})
+            # Llamada a función (tool call)
             elif hasattr(output, "function_call"):
+                function_result = await handle_function_call(output.function_call)
+                # Puedes reenviar el resultado al modelo si quieres que continúe el flujo
                 results.append({
                     "function_call": {
                         "name": output.function_call.name,
-                        "arguments": output.function_call.arguments
+                        "arguments": output.function_call.arguments,
+                        "webhook_result": function_result
                     }
-                })
-            elif hasattr(output, "file_search_call"):
-                file_results = getattr(output.file_search_call, "results", [])
-                results.append({
-                    "file_search_results": [
-                        { # Apertura del diccionario del resultado
-                            "text": getattr(res, 'text', ''),
-                            "file_id": getattr(res, 'file_id', '')
-                        } # Cierre del diccionario del resultado
-                        for res in file_results
-                    ] # Cierre de la lista de resultados
                 })
 
         if not results:
@@ -146,21 +156,17 @@ async def chat(request: ChatRequest = Body(...)):
                 media_type="application/json; charset=utf-8"
             )
 
-        # Devuelve el primer resultado (o ajusta si necesitas manejar múltiples)
+        # Devuelve el primer resultado relevante
         return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
 
     except Exception as e:
-        # Loguea el error detallado en Render
         logger.error(f"Error en /chat endpoint: {e}", exc_info=True)
-        # Devuelve un error 500 genérico y consistente al cliente (Botpress)
         return JSONResponse(
             status_code=500,
             content={"error": "Ocurrió un error interno procesando la solicitud."},
             media_type="application/json; charset=utf-8"
         )
 
-# Ejecución local (opcional)
 # if __name__ == "__main__":
 #     import uvicorn
 #     uvicorn.run(app, host="0.0.0.0", port=8000)
-
