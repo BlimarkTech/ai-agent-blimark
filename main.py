@@ -65,8 +65,8 @@ SYSTEM_MESSAGE = """
      - **Paso 2: Pide los Datos.**
         - **Si pudiste inferir el `mensaje` claramente:** Pide explícitamente SÓLO nombre, apellidos, email, teléfono y país. NO preguntes por el mensaje.
         - **Si NO pudiste inferir el `mensaje` o no está claro en la conversación:** Pide explícitamente nombre, apellidos, email, teléfono, país **Y TAMBIÉN pregunta por el `mensaje`** (ej: "Para entender mejor cómo podemos ayudarte, ¿podrías indicarme brevemente qué servicio o necesidad tenías en mente?").
-     - **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`** (ya sea el que inferiste o el que el usuario te dio después de preguntarle), **DEBES** llamar inmediatamente a la función `recolectarInformacionContacto` usando la tool call. Pasa todos los datos recopilados. **NO** respondas con texto normal en este punto, solo realiza la llamada a la función.
-     - **Si faltan datos mínimos (nombre/email/mensaje si se preguntó):** Si el usuario responde pero no proporciona nombre y email (y el mensaje, si lo preguntaste), pídele *específicamente* los datos mínimos que falten para poder continuar.
+     - **Condición para llamar a la función:** Tan pronto como tengas el **nombre**, el **email** y el **`mensaje`** (ya sea el que inferiste, el que el usuario te dio, o un string vacío si no se pudo determinar y no se preguntó/respondió), y hayas intentado obtener los otros datos (apellidos, teléfono, país), **DEBES** llamar inmediatamente a la función `recolectarInformacionContacto` usando la tool call. Pasa todos los datos recopilados (usando "" para los opcionales que no obtuviste). **NO** respondas con texto normal en este punto, solo realiza la llamada a la función.
+     - **Si faltan datos mínimos (nombre/email):** Si el usuario responde pero no proporciona nombre y email, pídele *específicamente* esos datos mínimos que falten para poder continuar.
    - **Después de la llamada a función exitosa:**
      - Una vez ejecutada la función `recolectarInformacionContacto` con éxito (confirmado por su resultado):
         - Agradécele por los datos.
@@ -86,7 +86,7 @@ SYSTEM_MESSAGE = """
 4. **Placeholder para enlace:** Usa siempre `[MEETING_URL]` para el enlace de agendamiento.
 """
 
-# --- DEFINICIÓN DE TOOLS ---
+# --- DEFINICIÓN DE TOOLS CORREGIDA (required incluye todas las properties) ---
 tools = [
     {
         "type": "file_search",
@@ -96,26 +96,28 @@ tools = [
         # Herramienta de función (índice 1)
         "type": "function",
         "name": "recolectarInformacionContacto",
-        "description": "Recolecta información de contacto de un lead (nombre, email obligatorios; opcionales: apellidos, teléfono, país) y un mensaje sobre sus necesidades (idealmente inferido de la conversación, o preguntado si no estaba claro). Envía estos datos a un sistema externo (webhook).",
+        "description": "Recolecta información de contacto de un lead (nombre, email obligatorios) y también apellidos, teléfono, país, y un mensaje sobre sus necesidades (idealmente inferido o preguntado). Envía estos datos a un sistema externo (webhook). Si los campos opcionales (apellidos, teléfono, país, mensaje si no se infiere/obtiene) no están disponibles, se enviarán como strings vacíos.",
         "strict": True, # Mantenemos el modo estricto
         "parameters": {
             "type": "object",
             "properties": {
                 "nombre": {"type": "string", "description": "Nombre del lead."},
-                "apellidos": {"type": "string", "description": "Apellidos del lead (opcional)."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead. Enviar '' (string vacío) si no se obtiene."},
                 "email": {"type": "string", "description": "Correo electrónico del lead."},
-                "telefono": {"type": "string", "description": "Número de teléfono del lead (opcional)."},
-                "pais": {"type": "string", "description": "País de residencia del lead (opcional)."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead. Enviar '' (string vacío) si no se obtiene."},
+                "pais": {"type": "string", "description": "País de residencia del lead. Enviar '' (string vacío) si no se obtiene."},
                 "mensaje": {
                     "type": "string",
-                    "description": "Breve descripción del servicio o necesidad del lead (ej: chatbot IA, SEO). **IMPORTANTE: Intenta inferir este valor del historial. Si no es posible determinarlo claramente, debes preguntárselo explícitamente al usuario junto con los otros datos de contacto.**"
+                    "description": "Breve descripción del servicio/necesidad (inferido o preguntado). **IMPORTANTE: Intenta inferir del historial. Si no es claro, pregunta. Si aun así no se obtiene, enviar '' (string vacío).**"
                 }
             },
-            "required": ["nombre", "email", "mensaje"],
-            "additionalProperties": False  # <-- AÑADIR ESTA LÍNEA
+            # --- CORRECCIÓN CLAVE: Listar TODAS las propiedades definidas arriba ---
+            "required": ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"],
+            "additionalProperties": False  # Mantenemos esto por el error anterior
         }
     }
 ]
+
 
 # Webhook para leads
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9")
@@ -131,24 +133,21 @@ async def handle_function_call(function_call):
     logger.info(f"Ejecutando función: {function_name}")
     try:
         args = json.loads(function_call.arguments)
-        logger.info(f"Argumentos recibidos para webhook (inferidos/preguntados por el modelo): {args}")
+        logger.info(f"Argumentos recibidos para webhook (modelo DEBE proveer todos): {args}")
 
-        # Verificación mínima
-        if not all(key in args and args[key] for key in ["nombre", "email", "mensaje"]):
-             logger.warning("La llamada a función no contenía todos los argumentos requeridos (nombre, email, mensaje).")
-             # Decide cómo manejar esto: error o enviar datos parciales
-             # return {"success": False, "error": "Faltan argumentos requeridos"}
+        # Verificación: Ahora el schema obliga a que todos existan.
+        # Podemos verificar que los conceptualmente obligatorios (nombre, email) no estén vacíos si queremos
+        if not args.get("nombre") or not args.get("email"):
+             logger.warning("La llamada a función tiene nombre o email vacíos, aunque el schema los requiere.")
+             # Podrías decidir si esto es un error o no. Por ahora, lo permitimos.
+             # return {"success": False, "error": "Nombre o email están vacíos."}
 
-        complete_args = {
-            "nombre": args.get("nombre"),
-            "apellidos": args.get("apellidos"),
-            "email": args.get("email"),
-            "telefono": args.get("telefono"),
-            "pais": args.get("pais"),
-            "mensaje": args.get("mensaje")
-        }
+        # El modelo debería haber llenado todos los campos (posiblemente con "" para los opcionales)
+        # por lo que `complete_args` es directamente `args`.
+        complete_args = args
 
         if WEBHOOK_URL:
+             logger.info(f"Enviando al webhook: {complete_args}")
              response = requests.post(WEBHOOK_URL, json=complete_args)
              response.raise_for_status()
              result = {"success": True, "status_code": response.status_code, "response": response.text[:500]}
@@ -198,6 +197,9 @@ async def chat(request: ChatRequest = Body(...)):
         logger.info(f"Respuesta inicial de OpenAI recibida. Output: {response.output}")
 
         tool_call_output = None
+        # Variable para guardar el contenido de texto si viene junto a la function call
+        initial_text_content = ""
+
         for output_item in response.output:
             if hasattr(output_item, "function_call") and output_item.type == "function_call":
                 logger.info(f"Llamada a función detectada: {output_item.function_call.name}")
@@ -207,52 +209,81 @@ async def chat(request: ChatRequest = Body(...)):
                 tool_call_output = {
                      "type": "function_call_output",
                      "call_id": output_item.call_id,
-                     "output": json.dumps(function_result)
+                     "output": json.dumps(function_result) # El output debe ser un string JSON
                 }
-                if not function_result.get("success", False):
-                    logger.warning("La ejecución de la función falló. Se informará al modelo.")
-                break
+                # No hacemos break aquí por si acaso hay texto también
 
             elif hasattr(output_item, "content"):
                  if output_item.content and hasattr(output_item.content[0], 'text'):
-                      final_response_text = output_item.content[0].text
-                      logger.info(f"Respuesta de texto directa recibida: {final_response_text}")
+                      initial_text_content = output_item.content[0].text
+                      logger.info(f"Respuesta de texto directa (o junto a FC) recibida: {initial_text_content}")
 
-        # --- SI HUBO FUNCTION CALL, HACER SEGUNDA LLAMADA ---
+        # Priorizar la llamada a función si existe
         if tool_call_output:
             logger.info("Realizando segunda llamada a OpenAI con el resultado de la función...")
-            messages.append(response.output[0])
-            messages.append(tool_call_output)
+            # Añadir la llamada original del modelo (que contiene la function_call)
+            # y el resultado de nuestra función al historial
+            # Buscamos el mensaje original que contenía la llamada a función
+            function_call_message = None
+            for out_item in response.output:
+                 if hasattr(out_item, "function_call"):
+                      function_call_message = out_item
+                      break
+            if function_call_message:
+                 messages.append(function_call_message) # Añadir el mensaje con 'function_call'
+            else:
+                 # Esto no debería pasar si tool_call_output está seteado, pero por seguridad
+                 logger.error("Error: tool_call_output existe pero no se encontró el mensaje original con function_call.")
+                 # Decide cómo manejarlo, quizás retornar error
+                 return JSONResponse(status_code=500, content={"error": "Error interno procesando la llamada a función."})
+
+            messages.append(tool_call_output) # Añadir el resultado de la función
 
             response2 = await openai_client.responses.create(
                 model="gpt-4.1", # Usar el mismo modelo
                 input=messages,
-                tools=tools
+                tools=tools # Volver a pasar las tools por si acaso
             )
             logger.info(f"Respuesta final de OpenAI recibida. Output: {response2.output}")
 
+            # Extraer la respuesta final de texto
             for out2 in response2.output:
                  if hasattr(out2, "content") and out2.content:
                       if hasattr(out2.content[0], 'text'):
                            final_response_text = out2.content[0].text
                            logger.info(f"Respuesta de texto final recibida después de function call: {final_response_text}")
-                           break
+                           break # Tomar la primera respuesta de texto
+        else:
+            # Si no hubo llamada a función, usar el texto inicial si lo hubo
+            final_response_text = initial_text_content
 
         # --- MANEJO DE RESPUESTA VACÍA / FALLO ---
-        if not final_response_text:
-             logger.warning("No se generó una respuesta de texto final válida desde la API.")
-             final_response_text = "Lo siento, hubo un problema procesando tu solicitud. Por favor, intenta de nuevo." # Mensaje genérico
+        if not final_response_text and not tool_call_output:
+             # Si no hubo ni llamada a función ni texto en la primera respuesta
+             logger.warning("No se generó ninguna respuesta válida (ni texto ni FC) desde la API.")
+             final_response_text = "Lo siento, no pude procesar tu solicitud en este momento. Por favor, intenta de nuevo."
+        elif not final_response_text and tool_call_output:
+            # Si hubo FC pero la segunda llamada no generó texto
+             logger.warning("Hubo llamada a función pero no se generó texto final en la segunda llamada.")
+             # Podríamos asumir que la FC fue la acción principal y no se necesita texto,
+             # o enviar un mensaje genérico de confirmación si la función tuvo éxito.
+             if json.loads(tool_call_output["output"]).get("success"):
+                  final_response_text = "¡Entendido! He procesado tu solicitud." # Mensaje genérico post-FC
+             else:
+                  final_response_text = "Intenté procesar tu solicitud, pero ocurrió un problema con la acción requerida."
+
 
         # --- REEMPLAZAR PLACEHOLDER CON ENLACE REAL ---
         # !!! NECESITAS IMPLEMENTAR ESTO: Consulta tu Vector Store aquí !!!
-        meeting_url_from_vector_store = "https://tu-calendly-real.com/reunion" # Reemplaza con tu lógica
+        meeting_url_from_vector_store = "https://calendly.com/tu-enlace-real" # Reemplaza con tu lógica real
         if "[MEETING_URL]" in final_response_text:
             logger.info("Reemplazando placeholder [MEETING_URL]")
             final_response_text = final_response_text.replace("[MEETING_URL]", meeting_url_from_vector_store)
         # Fallback si olvida el placeholder pero la intención es clara
-        elif ("agenda" in final_response_text.lower() or "enlace" in final_response_text.lower()) and "http" not in final_response_text:
-             logger.warning("El modelo no usó [MEETING_URL]. Añadiendo URL manualmente.")
-             final_response_text += f"\nPuedes agendar aquí: {meeting_url_from_vector_store}"
+        elif ("agenda" in final_response_text.lower() or "enlace" in final_response_text.lower() or "reunión" in final_response_text.lower()) and "http" not in final_response_text and tool_call_output and json.loads(tool_call_output["output"]).get("success"):
+             # Añadir URL solo si parece intentar enviarla Y la función tuvo éxito
+             logger.warning("El modelo no usó [MEETING_URL] pero parece intentar enviar el enlace tras FC exitosa. Añadiendo URL manualmente.")
+             final_response_text += f"\nPuedes agendar la reunión aquí: {meeting_url_from_vector_store}"
 
 
         logger.info(f"Enviando respuesta final al usuario: {final_response_text}")
@@ -260,14 +291,24 @@ async def chat(request: ChatRequest = Body(...)):
 
     except Exception as e:
         logger.error(f"Error grave en /chat endpoint: {e}", exc_info=True)
+        # Devolver el error específico de OpenAI si es un BadRequestError para facilitar depuración
+        if isinstance(e, AsyncOpenAI.BadRequestError):
+             error_content = e.response.json() if hasattr(e.response, 'json') else str(e)
+             logger.error(f"Detalle del BadRequestError: {error_content}")
+             return JSONResponse(
+                 status_code=400, # O 500 si prefieres ocultar el detalle
+                 content={"error": f"Error de OpenAI: {error_content}"},
+                 media_type="application/json; charset=utf-8"
+             )
         return JSONResponse(
             status_code=500,
             content={"error": "Ocurrió un error interno inesperado procesando la solicitud."},
             media_type="application/json; charset=utf-8"
         )
 
-# Descomenta para correr localmente
+# Descomenta para correr localmente con uvicorn
 # if __name__ == "__main__":
 #     import uvicorn
-#     port = int(os.getenv("PORT", 8000))
+#     # Asegúrate de tener las variables de entorno OPENAI_API_KEY y opcionalmente WEBHOOK_URL configuradas
+#     port = int(os.getenv("PORT", 8000)) # Render usa la variable PORT
 #     uvicorn.run(app, host="0.0.0.0", port=port)
