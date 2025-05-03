@@ -1,12 +1,14 @@
 import os
 import logging
+import re
+import json
+import requests
+
 from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AsyncOpenAI
-import json
-import requests
 
 # Configuración de logging
 logging.basicConfig(level=logging.INFO)
@@ -145,6 +147,20 @@ async def handle_function_call(function_call):
         logger.error(f"Error enviando al webhook: {e}")
         return {"success": False, "error": str(e)}
 
+def extract_lead_data(text):
+    # Simple regex para extraer nombre, email y teléfono
+    email_match = re.search(r'[\w\.-]+@[\w\.-]+', text)
+    phone_match = re.search(r'\+?\d[\d\s\-]{7,}', text)
+    nombre = text.split(',')[0] if ',' in text else ""
+    return {
+        "nombre": nombre.strip(),
+        "email": email_match.group(0) if email_match else "",
+        "telefono": phone_match.group(0) if phone_match else "",
+        "apellidos": "",
+        "pais": "",
+        "mensaje": ""
+    }
+
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
     logger.info(f"Historial recibido: {request.history}")
@@ -152,7 +168,6 @@ async def chat(request: ChatRequest = Body(...)):
         messages = [
             {"role": "system", "content": SYSTEM_MESSAGE}
         ]
-        # Agregar el historial recibido
         if request.history:
             messages.extend(request.history)
         else:
@@ -175,18 +190,13 @@ async def chat(request: ChatRequest = Body(...)):
 
         for output in response.output:
             if hasattr(output, "function_call"):
-                # Ejecuta la función (envía datos al webhook)
                 function_result = await handle_function_call(output.function_call)
                 tool_call_handled = True
-
-                # Añade el resultado como mensaje de función para el modelo
                 messages.append({
                     "role": "function",
                     "name": output.function_call.name,
                     "content": json.dumps(function_result)
                 })
-
-                # Segunda llamada a OpenAI para que genere la respuesta final (confirmación, enlace, etc.)
                 response2 = await openai_client.responses.create(
                     model="gpt-4.1",
                     input=messages,
@@ -197,8 +207,18 @@ async def chat(request: ChatRequest = Body(...)):
                         if hasattr(out2.content[0], 'text'):
                             results.append({"response": out2.content[0].text})
 
-        if not tool_call_handled:
-            # Si no hubo tool call, procesa la respuesta normal
+        # Fallback: si no hubo tool call, pero el último mensaje del usuario parece tener datos de contacto
+        if not tool_call_handled and request.history:
+            last_user_msg = request.history[-1]['content']
+            lead_data = extract_lead_data(last_user_msg)
+            if lead_data["nombre"] and lead_data["email"] and lead_data["telefono"]:
+                # Llama manualmente al webhook
+                requests.post(WEBHOOK_URL, json=lead_data)
+                results.append({
+                    "response": "¡Gracias! Hemos recibido tus datos y te enviamos el enlace para agendar tu reunión. Aquí puedes elegir día y hora: [ENLACE_DESDE_VECTOR_STORE]"
+                })
+
+        if not results:
             for output in response.output:
                 if hasattr(output, "content") and output.content:
                     if hasattr(output.content[0], 'text'):
@@ -212,7 +232,6 @@ async def chat(request: ChatRequest = Body(...)):
                 media_type="application/json; charset=utf-8"
             )
 
-        # Devuelve el primer resultado relevante
         return JSONResponse(content=results[0], media_type="application/json; charset=utf-8")
 
     except Exception as e:
