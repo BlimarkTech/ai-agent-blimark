@@ -200,29 +200,22 @@ async def chat(request: ChatRequest = Body(...)):
                     initial_text += getattr(chunk, "text", "")
 
         # Si hay llamada a función
-        if detected_fc:
-            logger.info(f"Función detectada: {detected_fc.name}")
-            fc_result = await handle_function_call(detected_fc)
-
-            # Reinsertar mensajes en el contexto
-            messages.append({
-                "role": "assistant",
-                "content": "",
-                "tool_calls": [{
-                    "id": detected_fc.call_id,
-                    "type": "function",
-                    "function": {
-                        "name": detected_fc.name,
-                        "arguments": detected_fc.arguments
-                    }
-                }]
-            })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": detected_fc.call_id,
-                "name": detected_fc.name,
-                "content": json.dumps(fc_result)
-            })
+if detected_fc:
+    logger.info(f"Función detectada: {detected_fc.name}")
+    fc_result = await handle_function_call(detected_fc)
+    
+    # Añadir el resultado de la función como un mensaje independiente
+    messages.append({
+        "role": "assistant",
+        "content": None
+    })
+    
+    messages.append({
+        "role": "tool",
+        "content": json.dumps(fc_result),
+        "tool_call_id": detected_fc.call_id,
+        "name": detected_fc.name
+    })
 
             # Segunda llamada a la Responses API
             logger.info("Realizando segunda llamada a OpenAI...")
