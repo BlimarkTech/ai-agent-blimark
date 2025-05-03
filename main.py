@@ -207,7 +207,7 @@ async def chat(request: ChatRequest = Body(...)):
             # Añadir el resultado de la función como un mensaje independiente
             messages.append({
                 "role": "assistant",
-                "content": None
+                "content": ""
             })
     
             messages.append({
