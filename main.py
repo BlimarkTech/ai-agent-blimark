@@ -160,8 +160,8 @@ def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
             name = json.loads(fc_msg.arguments).get("nombre", "")
         except:
             name = ""
-        saludo = f"¡Muchas gracias por tus datos, {name}!" if name else "¡Muchas gracias por tus datos!"
-        return f"{saludo} Puedes agendar tu reunión aquí: [MEETING_URL]"
+        saludo = f"¡Muchas gracias, {name}! Hemos recibido tu información correctamente." if name else "¡Muchas gracias! Hemos recibido tu información correctamente."
+        return f"{saludo} Puedes agendar la reunión en la fecha y hora que prefieras aquí: [Agendar Cita]"
     return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
 
 # ----------------------------
@@ -215,12 +215,7 @@ async def chat(request: ChatRequest = Body(...)):
         else:
             # Sólo texto sin función
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
-
-        # Reemplazar placeholder
-        if "[MEETING_URL]" in final_text:
-            meeting_url = "https://calendly.com/tu-enlace-real"
-            final_text = final_text.replace("[MEETING_URL]", meeting_url)
-
+        
         logger.info(f"Respuesta final: {final_text}")
         return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
