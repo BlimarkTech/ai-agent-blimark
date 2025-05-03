@@ -207,7 +207,7 @@ async def chat(request: ChatRequest = Body(...)):
             # Reinsertar mensajes en el contexto
             messages.append({
                 "role": "assistant",
-                "content": None,
+                "content": "",
                 "function_call": {
                     "name": detected_fc.name,
                     "arguments": detected_fc.arguments
