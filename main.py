@@ -36,7 +36,7 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     history: list  # Recibe el historial completo de mensajes
 
-# Instrucciones del sistema
+# Instrucciones del sistema (optimizadas y reforzadas)
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
    - Actúa como agente de servicio al cliente de la Agencia de Marketing *Blimark Tech*.
@@ -68,6 +68,7 @@ SYSTEM_MESSAGE = """
    - Si el usuario acepta agendar una reunión:
      - Solicita sus datos de contacto explicándole que es para enviarle la URL para agendar citas.
    - Si el usuario comparte sus datos:
+     - **Debes SIEMPRE llamar a la función `recolectarInformacionContacto` usando la tool call, en vez de responder solo con texto. No confirmes la recepción de los datos ni envíes el enlace de la reunión hasta que la función haya sido llamada y completada.**
      - Agradécele por compartirlos y obtén la URL para agendar citas desde el vector store.
      - Proporciona la URL para agendar citas al usuario y explícale que allí puede elegir el día y la hora que prefiera.
      - Asegúrate de que el usuario haya compartido sus datos de contacto antes de proporcionarle la URL para agendar citas.
@@ -162,6 +163,7 @@ async def chat(request: ChatRequest = Body(...)):
         if len(messages) > MAX_HISTORY + 1:
             messages = [messages[0]] + messages[-MAX_HISTORY:]
 
+        # Primer request a OpenAI
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
@@ -169,21 +171,38 @@ async def chat(request: ChatRequest = Body(...)):
         )
 
         results = []
+        tool_call_handled = False
+
         for output in response.output:
-            # Respuesta normal del modelo
-            if hasattr(output, "content") and output.content:
-                if hasattr(output.content[0], 'text'):
-                    results.append({"response": output.content[0].text})
-            # Llamada a función (tool call)
-            elif hasattr(output, "function_call"):
+            if hasattr(output, "function_call"):
+                # Ejecuta la función (envía datos al webhook)
                 function_result = await handle_function_call(output.function_call)
-                results.append({
-                    "function_call": {
-                        "name": output.function_call.name,
-                        "arguments": output.function_call.arguments,
-                        "webhook_result": function_result
-                    }
+                tool_call_handled = True
+
+                # Añade el resultado como mensaje de función para el modelo
+                messages.append({
+                    "role": "function",
+                    "name": output.function_call.name,
+                    "content": json.dumps(function_result)
                 })
+
+                # Segunda llamada a OpenAI para que genere la respuesta final (confirmación, enlace, etc.)
+                response2 = await openai_client.responses.create(
+                    model="gpt-4.1",
+                    input=messages,
+                    tools=tools
+                )
+                for out2 in response2.output:
+                    if hasattr(out2, "content") and out2.content:
+                        if hasattr(out2.content[0], 'text'):
+                            results.append({"response": out2.content[0].text})
+
+        if not tool_call_handled:
+            # Si no hubo tool call, procesa la respuesta normal
+            for output in response.output:
+                if hasattr(output, "content") and output.content:
+                    if hasattr(output.content[0], 'text'):
+                        results.append({"response": output.content[0].text})
 
         if not results:
             logger.warning("No se generaron resultados válidos desde la API.")
