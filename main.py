@@ -70,10 +70,10 @@ SYSTEM_MESSAGE = """
      - **Si faltan datos mínimos (nombre/email):** Pídele *específicamente* los datos mínimos que falten.
    - **Después de la llamada a función exitosa (MUY IMPORTANTE):**
      - Una vez que la función `recolectarInformacionContacto` se haya ejecutado y recibas la confirmación de éxito, **TU SIGUIENTE RESPUESTA AL USUARIO DEBE SER**:
-       1.  Agradecerle explícitamente por compartir sus datos (ej: "¡Muchas gracias por tus datos, Enrique!").
+       1.  Agradecerle explícitamente por compartir sus datos (ej: "¡Muchas gracias por tus datos, [Nombre]!").
        2.  Indicar que ya puedes enviarle el enlace.
        3.  Incluir el placeholder `[MEETING_URL]` para que el backend inserte el enlace real (ej: "Puedes agendar tu reunión directamente en el siguiente enlace: [MEETING_URL]").
-       4.  NO hagas más preguntas en esta respuesta.
+       4.  NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
    - **Si el usuario RECHAZA compartir datos:**
      - Insiste *una sola vez*.
      - Si sigue negándose, no insistas más. Obtén la URL del vector store y envíasela directamente usando el placeholder `[MEETING_URL]`.
@@ -140,10 +140,7 @@ async def handle_function_call(function_call):
         # Verificación opcional: Asegurar que nombre y email no estén vacíos
         if not args.get("nombre") or not args.get("email"):
              logger.warning("La llamada a función tiene nombre o email vacíos, aunque el schema los requiere. Procediendo de todos modos.")
-             # Considera si esto debería ser un error para tu lógica de negocio
-             # return {"success": False, "error": "Nombre o email están vacíos."}
 
-        # El modelo debe haber llenado todos los campos (posiblemente con "")
         complete_args = args
 
         if WEBHOOK_URL:
@@ -184,7 +181,12 @@ async def chat(request: ChatRequest = Body(...)):
          messages = [messages[0]] + messages[-(MAX_HISTORY * 2):]
          logger.info(f"Historial truncado a los últimos {MAX_HISTORY} intercambios.")
 
-    final_response_text = ""
+    final_response_text = "" # Texto final a enviar al usuario
+    initial_text_content = "" # Texto recibido en la primera respuesta (si lo hay)
+    tool_call_output_dict = None # Resultado de nuestra ejecución de función
+    original_function_call_message = None # Mensaje original de la API con la FC
+    function_call_detected = False # Flag para indicar si se detectó FC
+
     try:
         # --- PRIMERA LLAMADA A OPENAI ---
         logger.info("Realizando primera llamada a OpenAI...")
@@ -196,52 +198,49 @@ async def chat(request: ChatRequest = Body(...)):
         )
         logger.info(f"Respuesta inicial de OpenAI recibida. Output: {response.output}")
 
-        tool_call_output_dict = None # Para guardar el resultado de nuestra función
-        original_function_call_message = None # Para guardar el mensaje original de la API con la FC
-
         # Procesar la respuesta inicial
         for output_item in response.output:
             if hasattr(output_item, "function_call") and output_item.type == "function_call":
                 logger.info(f"Llamada a función detectada: {output_item.function_call.name}")
+                function_call_detected = True
                 original_function_call_message = output_item # Guardar el mensaje original
+                # Ejecutar la función AHORA
                 function_result = await handle_function_call(output_item.function_call)
                 logger.info(f"Resultado de la ejecución de la función: {function_result}")
 
-                # Preparar el output para la segunda llamada
+                # Preparar el output para la posible segunda llamada
                 tool_call_output_dict = {
                      "type": "function_call_output",
                      "call_id": output_item.call_id, # Usar el call_id correcto
                      "output": json.dumps(function_result) # El output debe ser un string JSON
                 }
-                # No hacer break, por si hay texto también (aunque no debería según el prompt)
+                # No hacer break, por si hay más items (aunque improbable con FC)
 
             elif hasattr(output_item, "content"):
-                 # Capturar texto si la API lo envía (respuesta directa o junto a FC)
+                 # Capturar texto si la API lo envía (respuesta directa)
                  if output_item.content and hasattr(output_item.content[0], 'text'):
-                      # Si ya tenemos una llamada a función, ignoramos este texto inicial
-                      if not original_function_call_message:
-                          final_response_text = output_item.content[0].text
-                          logger.info(f"Respuesta de texto directa recibida: {final_response_text}")
-                      else:
-                          logger.info(f"Texto recibido junto a FC (ignorado por ahora): {output_item.content[0].text}")
+                      initial_text_content = output_item.content[0].text
+                      logger.info(f"Respuesta de texto inicial recibida: {initial_text_content}")
 
+        # --- DECISIÓN BASADA EN LA PRIMERA RESPUESTA ---
 
-        # --- SI HUBO FUNCTION CALL, REALIZAR SEGUNDA LLAMADA ---
-        if tool_call_output_dict:
-            if not original_function_call_message:
-                 # Sanity check: esto no debería ocurrir si tool_call_output_dict está seteado
-                 logger.error("Error lógico: tool_call_output_dict existe pero original_function_call_message no.")
+        if function_call_detected:
+            # Si se detectó una llamada a función, necesitamos la segunda llamada para la respuesta textual
+            if not tool_call_output_dict or not original_function_call_message:
+                 # Error lógico interno si no se guardaron los detalles de la FC
+                 logger.error("Error lógico: FC detectada pero falta tool_call_output_dict u original_function_call_message.")
                  return JSONResponse(status_code=500, content={"error": "Error interno procesando llamada a función."})
 
             logger.info("Realizando segunda llamada a OpenAI con el resultado de la función...")
-            # Añadir el mensaje original con la function_call y el resultado de nuestra función
-            messages.append(original_function_call_message)
-            messages.append(tool_call_output_dict)
+            # Construir historial para la segunda llamada
+            messages_for_second_call = list(messages) # Copiar historial original
+            messages_for_second_call.append(original_function_call_message) # Añadir el mensaje con 'function_call'
+            messages_for_second_call.append(tool_call_output_dict) # Añadir el resultado de la función
 
             response2 = await openai_client.responses.create(
                 model="gpt-4.1", # Usar el mismo modelo
-                input=messages,
-                tools=tools # Volver a pasar las tools por si acaso
+                input=messages_for_second_call,
+                tools=tools # Volver a pasar las tools
             )
             logger.info(f"Respuesta final de OpenAI recibida tras FC. Output: {response2.output}")
 
@@ -253,61 +252,72 @@ async def chat(request: ChatRequest = Body(...)):
                            logger.info(f"Respuesta de texto final recibida después de function call: {final_response_text}")
                            break # Tomar la primera respuesta de texto
 
-            # --- MANEJO SI LA SEGUNDA LLAMADA NO DIO TEXTO ---
+            # Fallback si la segunda llamada no dio texto
             if not final_response_text:
                 logger.warning("La segunda llamada a OpenAI (después de FC) no generó texto.")
-                # Verificar si la función original tuvo éxito
                 function_success = json.loads(tool_call_output_dict["output"]).get("success", False)
                 if function_success:
-                    # Si la función tuvo éxito pero no hay texto, enviar un mensaje genérico de éxito + enlace (último recurso)
                     logger.info("Función exitosa, pero sin texto del modelo. Enviando confirmación genérica + URL.")
-                    final_response_text = "¡Listo! He procesado tus datos. Puedes agendar tu reunión aquí: [MEETING_URL]" # Incluir placeholder
+                    # Usar el nombre si está disponible en los args de la función original
+                    try:
+                        original_args = json.loads(original_function_call_message.function_call.arguments)
+                        user_name = original_args.get("nombre", "usuario")
+                    except:
+                        user_name = "usuario"
+                    final_response_text = f"¡Muchas gracias por tus datos, {user_name}! Puedes agendar tu reunión aquí: [MEETING_URL]"
                 else:
-                    # Si la función falló Y no hay texto, indicar el problema
                     logger.error("La función falló y el modelo no generó texto de error.")
                     final_response_text = "Lo siento, hubo un problema al procesar la información que proporcionaste. Por favor, inténtalo de nuevo."
 
-        # --- SI NO HUBO FUNCTION CALL (Respuesta directa de texto) ---
-        # `final_response_text` ya tendría el texto de la primera llamada si lo hubo.
-        # Verificar si está vacío incluso sin FC (caso raro de error o respuesta vacía)
-        elif not final_response_text:
-             logger.warning("No hubo llamada a función y tampoco se recibió texto en la respuesta inicial.")
-             final_response_text = "Lo siento, no pude procesar tu solicitud en este momento. Por favor, intenta de nuevo."
+        elif initial_text_content:
+            # Si no hubo FC pero sí texto inicial, usar ese texto
+            logger.info("No hubo llamada a función. Usando el texto de la respuesta inicial.")
+            final_response_text = initial_text_content
+
+        else:
+            # Si no hubo ni FC ni texto inicial (respuesta vacía o error inesperado)
+            logger.warning("Respuesta inicial de OpenAI no contenía ni llamada a función ni texto.")
+            final_response_text = "Lo siento, no pude obtener una respuesta válida en este momento. Por favor, intenta de nuevo."
 
 
         # --- REEMPLAZAR PLACEHOLDER CON ENLACE REAL ---
         # !!! NECESITAS IMPLEMENTAR ESTO: Consulta tu Vector Store aquí !!!
         try:
             # Simulación de consulta a Vector Store (REEMPLAZAR CON TU LÓGICA REAL)
-            # Ejemplo: meeting_url_from_vector_store = query_vector_store("meeting_link")
             meeting_url_from_vector_store = "https://calendly.com/tu-enlace-real" # ¡¡¡REEMPLAZA ESTO!!!
             if not meeting_url_from_vector_store:
                 logger.error("¡No se pudo obtener la URL de agendamiento desde el Vector Store!")
-                # Decide cómo manejarlo: ¿enviar respuesta sin enlace? ¿error?
-                # Por ahora, eliminamos el placeholder si no hay URL
                 final_response_text = final_response_text.replace("[MEETING_URL]", "(enlace no disponible)")
             elif "[MEETING_URL]" in final_response_text:
                 logger.info(f"Reemplazando placeholder [MEETING_URL] con: {meeting_url_from_vector_store}")
                 final_response_text = final_response_text.replace("[MEETING_URL]", meeting_url_from_vector_store)
-            # Considerar el fallback si es necesario (añadido en versión anterior, opcional)
 
         except Exception as url_error:
             logger.error(f"Error al obtener/reemplazar URL de agendamiento: {url_error}", exc_info=True)
-            # Decide cómo manejarlo, por ahora eliminamos el placeholder
             final_response_text = final_response_text.replace("[MEETING_URL]", "(enlace no disponible)")
 
+
+        # --- Enviar la respuesta final ---
+        if not final_response_text:
+             # Último recurso si todo lo demás falla y final_response_text sigue vacío
+             logger.error("Error crítico: final_response_text quedó vacío al final del proceso.")
+             final_response_text = "Lo siento, ocurrió un error inesperado. Intenta de nuevo más tarde."
 
         logger.info(f"Enviando respuesta final al usuario: {final_response_text}")
         return JSONResponse(content={"response": final_response_text}, media_type="application/json; charset=utf-8")
 
     except BadRequestError as e: # Capturar específicamente BadRequestError
         logger.error(f"Error de OpenAI (BadRequestError): {e}", exc_info=True)
-        error_content = e.response.json() if hasattr(e, 'response') and hasattr(e.response, 'json') else str(e)
-        logger.error(f"Detalle del BadRequestError: {error_content}")
+        try:
+            error_content = e.response.json()
+            error_message = error_content.get('error', {}).get('message', str(e))
+        except: # Fallback si no se puede parsear el JSON
+             error_message = str(e)
+        logger.error(f"Detalle del BadRequestError: {error_message}")
         # Devolver el error 400 con el detalle de OpenAI
         return JSONResponse(
             status_code=400,
-            content={"error": f"Error de validación de OpenAI: {error_content}"},
+            content={"error": f"Error de validación de OpenAI: {error_message}"},
             media_type="application/json; charset=utf-8"
         )
     except Exception as e:
