@@ -95,10 +95,9 @@ tools = [
     {
         # Herramienta de función (índice 1)
         "type": "function",
-        # 'name', 'description', 'parameters', 'strict' van a este nivel
         "name": "recolectarInformacionContacto",
         "description": "Recolecta información de contacto de un lead (nombre, email obligatorios; opcionales: apellidos, teléfono, país) y un mensaje sobre sus necesidades (idealmente inferido de la conversación, o preguntado si no estaba claro). Envía estos datos a un sistema externo (webhook).",
-        "strict": True, # 'strict' parece ir a este nivel según el error y otros ejemplos [4]
+        "strict": True, # Mantenemos el modo estricto
         "parameters": {
             "type": "object",
             "properties": {
@@ -112,7 +111,8 @@ tools = [
                     "description": "Breve descripción del servicio o necesidad del lead (ej: chatbot IA, SEO). **IMPORTANTE: Intenta inferir este valor del historial. Si no es posible determinarlo claramente, debes preguntárselo explícitamente al usuario junto con los otros datos de contacto.**"
                 }
             },
-            "required": ["nombre", "email", "mensaje"]
+            "required": ["nombre", "email", "mensaje"],
+            "additionalProperties": False  # <-- AÑADIR ESTA LÍNEA
         }
     }
 ]
