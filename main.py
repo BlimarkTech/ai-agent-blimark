@@ -86,34 +86,33 @@ SYSTEM_MESSAGE = """
 4. **Placeholder para enlace:** Usa siempre `[MEETING_URL]` para el enlace de agendamiento.
 """
 
-# --- DEFINICIÓN DE TOOLS CON DESCRIPCIÓN DE MENSAJE AJUSTADA ---
+# --- DEFINICIÓN DE TOOLS ---
 tools = [
     {
         "type": "file_search",
         "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"] # Asegúrate que este ID es correcto
     },
     {
+        # Herramienta de función (índice 1)
         "type": "function",
-        "function": {
-            "name": "recolectarInformacionContacto",
-            "description": "Recolecta información de contacto de un lead (nombre, email obligatorios; opcionales: apellidos, teléfono, país) y un mensaje sobre sus necesidades (idealmente inferido de la conversación, o preguntado si no estaba claro). Envía estos datos a un sistema externo (webhook).",
-            "strict": True,
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nombre": {"type": "string", "description": "Nombre del lead."},
-                    "apellidos": {"type": "string", "description": "Apellidos del lead (opcional)."},
-                    "email": {"type": "string", "description": "Correo electrónico del lead."},
-                    "telefono": {"type": "string", "description": "Número de teléfono del lead (opcional)."},
-                    "pais": {"type": "string", "description": "País de residencia del lead (opcional)."},
-                    "mensaje": {
-                        "type": "string",
-                        # Descripción actualizada para lógica condicional
-                        "description": "Breve descripción del servicio o necesidad del lead (ej: chatbot IA, SEO). **IMPORTANTE: Intenta inferir este valor del historial. Si no es posible determinarlo claramente, debes preguntárselo explícitamente al usuario junto con los otros datos de contacto.**"
-                    }
-                },
-                "required": ["nombre", "email", "mensaje"]
-            }
+        # 'name', 'description', 'parameters', 'strict' van a este nivel
+        "name": "recolectarInformacionContacto",
+        "description": "Recolecta información de contacto de un lead (nombre, email obligatorios; opcionales: apellidos, teléfono, país) y un mensaje sobre sus necesidades (idealmente inferido de la conversación, o preguntado si no estaba claro). Envía estos datos a un sistema externo (webhook).",
+        "strict": True, # 'strict' parece ir a este nivel según el error y otros ejemplos [4]
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "nombre": {"type": "string", "description": "Nombre del lead."},
+                "apellidos": {"type": "string", "description": "Apellidos del lead (opcional)."},
+                "email": {"type": "string", "description": "Correo electrónico del lead."},
+                "telefono": {"type": "string", "description": "Número de teléfono del lead (opcional)."},
+                "pais": {"type": "string", "description": "País de residencia del lead (opcional)."},
+                "mensaje": {
+                    "type": "string",
+                    "description": "Breve descripción del servicio o necesidad del lead (ej: chatbot IA, SEO). **IMPORTANTE: Intenta inferir este valor del historial. Si no es posible determinarlo claramente, debes preguntárselo explícitamente al usuario junto con los otros datos de contacto.**"
+                }
+            },
+            "required": ["nombre", "email", "mensaje"]
         }
     }
 ]
