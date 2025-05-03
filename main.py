@@ -10,20 +10,25 @@ from fastapi import FastAPI, Body
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import AsyncOpenAI, BadRequestError  # Importar BadRequestError
+from openai import AsyncOpenAI, BadRequestError
 
+# ----------------------------
 # Configuración de logging
+# ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ----------------------------
 # Cliente OpenAI
+# ----------------------------
 openai_api_key = os.getenv("OPENAI_API_KEY")
 if not openai_api_key:
     logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
-    # Aquí podrías lanzar una excepción o detener la ejecución si lo deseas
 openai_client = AsyncOpenAI(api_key=openai_api_key)
 
+# ----------------------------
 # FastAPI app y CORS
+# ----------------------------
 app = FastAPI()
 origins = ["*"]
 app.add_middleware(
@@ -34,11 +39,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Modelo para la solicitud POST
+# ----------------------------
+# Modelo de petición
+# ----------------------------
 class ChatRequest(BaseModel):
-    history: list  # Recibe el historial completo de mensajes
+    history: list  # Historial completo de mensajes
 
-# Instrucciones del sistema con inferencia condicional de 'mensaje' y respuesta post-FC
+# ----------------------------
+# Mensaje del sistema
+# ----------------------------
 SYSTEM_MESSAGE = """
 1. **Rol y objetivo:**
 - Actúa como agente de servicio al cliente de *Blimark Tech* (Agencia de Marketing e IA).
@@ -86,7 +95,9 @@ SYSTEM_MESSAGE = """
 4. **Placeholder para enlace:** Usa siempre `[MEETING_URL]` para el enlace de agendamiento en tu respuesta final al usuario.
 """
 
-# Definición de herramientas
+# ----------------------------
+# Definición de tools
+# ----------------------------
 tools = [
     {
         "type": "file_search",
@@ -97,21 +108,18 @@ tools = [
         "name": "recolectarInformacionContacto",
         "description": (
             "Recolecta información de contacto de un lead (nombre, apellidos, email, teléfono, país, mensaje) "
-            "y la envía a un webhook. Campos opcionales vacíos si no se proporcionan."
+            "y la envía a un webhook. Si un campo opcional no está disponible, enviar ''."
         ),
         "strict": True,
         "parameters": {
             "type": "object",
             "properties": {
-                "nombre": {"type": "string", "description": "Nombre del lead."},
-                "apellidos": {"type": "string", "description": "Apellidos del lead."},
-                "email": {"type": "string", "description": "Correo electrónico del lead."},
-                "telefono": {"type": "string", "description": "Teléfono del lead."},
-                "pais": {"type": "string", "description": "País de residencia."},
-                "mensaje": {
-                    "type": "string",
-                    "description": "Descripción de la necesidad (inferido o preguntado)."
-                }
+                "nombre": {"type": "string"},
+                "apellidos": {"type": "string"},
+                "email": {"type": "string"},
+                "telefono": {"type": "string"},
+                "pais": {"type": "string"},
+                "mensaje": {"type": "string"},
             },
             "required": ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"],
             "additionalProperties": False
@@ -119,7 +127,6 @@ tools = [
     }
 ]
 
-# Webhook para leads
 WEBHOOK_URL = os.getenv(
     "WEBHOOK_URL",
     "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9"
@@ -127,14 +134,14 @@ WEBHOOK_URL = os.getenv(
 if not WEBHOOK_URL:
     logger.warning("La URL del Webhook no está configurada. La exportación de leads no funcionará.")
 
+# ----------------------------
+# Función para ejecutar la llamada
+# ----------------------------
 async def handle_function_call(function_call):
-    """Ejecuta la llamada a función enviando datos al webhook."""
     if function_call.name != "recolectarInformacionContacto":
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
-        logger.info(f"Arguments for webhook: {args}")
-        # Enviar al webhook
         if WEBHOOK_URL:
             resp = requests.post(WEBHOOK_URL, json=args)
             resp.raise_for_status()
@@ -144,8 +151,10 @@ async def handle_function_call(function_call):
         logger.error(f"Error en handle_function_call: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
+# ----------------------------
+# Generador de fallback si falta texto tras FC
+# ----------------------------
 def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
-    """Genera mensaje de fallback si la segunda llamada no devuelve texto."""
     if result.get("success"):
         try:
             name = json.loads(fc_msg.arguments).get("nombre", "")
@@ -155,20 +164,22 @@ def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
         return f"{greeting} Puedes agendar tu reunión aquí: [MEETING_URL]"
     return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
 
+# ----------------------------
+# Endpoint /chat
+# ----------------------------
 @app.post("/chat")
 async def chat(request: ChatRequest = Body(...)):
     logger.info(f"Historial recibido: {request.history}")
     if not request.history:
         return JSONResponse(status_code=400, content={"error": "No se recibió historial de conversación."})
 
-    # Construir mensajes para OpenAI
+    # Armar mensajes de entrada
     current_messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + request.history
-    # Truncar si es muy largo
     if len(current_messages) > 201:
         current_messages = [current_messages[0]] + current_messages[-200:]
 
     try:
-        # Primera llamada
+        # Primera llamada a OpenAI
         logger.info("Realizando primera llamada a OpenAI...")
         response = await openai_client.responses.create(
             model="gpt-4.1",
@@ -177,46 +188,52 @@ async def chat(request: ChatRequest = Body(...)):
         )
         logger.info(f"Output primera llamada: {response.output}")
 
-        # Procesar respuesta inicial
+        # Detectar función o texto
         detected_fc = None
         initial_text = ""
         for item in response.output:
-            # Detectar llamada a función
-            if hasattr(item, "function_call") and item.function_call:
-                detected_fc = item.function_call
+            # Nuevo: detectar ResponseFunctionToolCall por su tipo
+            if getattr(item, "type", "") == "function_call":
+                detected_fc = item
                 break
-            # Capturar todo el texto
+            # Capturar todo el texto de salida
             if getattr(item, "content", None):
                 for chunk in item.content:
                     if hasattr(chunk, "text"):
                         initial_text += chunk.text
 
-        # Si se detectó función
+        # Si hay llamada a función
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
             fc_result = await handle_function_call(detected_fc)
 
-            # Segunda llamada con resultado de función
+            # Segunda llamada a OpenAI con resultado de la función
             messages2 = list(current_messages)
+            # 1) Mensaje de función
             messages2.append({
                 "role": "assistant",
                 "function_call": {
                     "name": detected_fc.name,
-                    "arguments": detected_fc.arguments
+                    "arguments": detected_fc.arguments,
+                    "call_id": detected_fc.call_id
                 }
             })
+            # 2) Resultado de la función
             messages2.append({
-                "role": "function",
-                "name": detected_fc.name,
-                "content": json.dumps(fc_result)
+                "type": "function_call_output",
+                "call_id": detected_fc.call_id,
+                "output": json.dumps(fc_result)
             })
+
             logger.info("Realizando segunda llamada a OpenAI...")
             response2 = await openai_client.responses.create(
                 model="gpt-4.1",
                 input=messages2,
                 tools=tools
             )
+            logger.info(f"Output segunda llamada: {response2.output}")
 
+            # Extraer texto final
             final_text = ""
             for out in response2.output:
                 if getattr(out, "content", None):
@@ -228,29 +245,22 @@ async def chat(request: ChatRequest = Body(...)):
         else:
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
 
-        # Reemplazar placeholder con la URL real
+        # Reemplazar placeholder
         if "[MEETING_URL]" in final_text:
-            meeting_url = "https://calendly.com/tu-enlace-real"  # Ajusta este enlace
+            meeting_url = "https://calendly.com/tu-enlace-real"
             final_text = final_text.replace("[MEETING_URL]", meeting_url)
 
         logger.info(f"Respuesta final: {final_text}")
-        return JSONResponse(
-            content={"response": final_text},
-            media_type="application/json; charset=utf-8"
-        )
+        return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
         return JSONResponse(status_code=400, content={"error": str(e)})
-
     except Exception as e:
-        logger.error(f"Error grave en /chat: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Ocurrió un error interno inesperado procesando la solicitud."}
-        )
+        logger.error(f"Error en /chat: {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "Error interno inesperado."})
 
-# Para ejecutar localmente con uvicorn, descomenta:
+# Uncomment to run locally
 # if __name__ == "__main__":
 #     import uvicorn
 #     port = int(os.getenv("PORT", 8000))
