@@ -124,6 +124,12 @@ async def chat(request: ChatRequest = Body(...)):
         else:
             return JSONResponse(status_code=400, content={"error": "No se recibió historial de conversación."})
 
+        # --- BUFFER DE 100 MENSAJES ---
+        MAX_HISTORY = 100
+        # messages[0] es el system prompt, los demás son el historial
+        if len(messages) > MAX_HISTORY + 1:
+            messages = [messages[0]] + messages[-MAX_HISTORY:]
+
         response = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
