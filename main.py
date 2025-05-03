@@ -34,7 +34,7 @@ app.add_middleware(
 
 # Modelo para la solicitud POST
 class ChatRequest(BaseModel):
-    history: list  # Ahora recibe el historial completo de mensajes
+    history: list  # Recibe el historial completo de mensajes
 
 # Instrucciones del sistema
 SYSTEM_MESSAGE = """
@@ -139,7 +139,6 @@ async def chat(request: ChatRequest = Body(...)):
             # Llamada a función (tool call)
             elif hasattr(output, "function_call"):
                 function_result = await handle_function_call(output.function_call)
-                # Puedes reenviar el resultado al modelo si quieres que continúe el flujo
                 results.append({
                     "function_call": {
                         "name": output.function_call.name,
