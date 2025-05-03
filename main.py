@@ -204,10 +204,9 @@ async def chat(request: ChatRequest = Body(...)):
             logger.info(f"Función detectada: {detected_fc.name}")
             fc_result = await handle_function_call(detected_fc)
 
-            # Reinsertar mensajes en el contexto para la segunda llamada
+            # Reinsertar mensajes en el contexto
             messages.append({
                 "role": "assistant",
-                "content": "",  # contenido vacío necesario para no romper el esquema
                 "function_call": {
                     "name": detected_fc.name,
                     "arguments": detected_fc.arguments
@@ -247,10 +246,7 @@ async def chat(request: ChatRequest = Body(...)):
             final_text = final_text.replace("[MEETING_URL]", meeting_url)
 
         logger.info(f"Respuesta final: {final_text}")
-        return JSONResponse(
-            content={"response": final_text},
-            media_type="application/json; charset=utf-8"
-        )
+        return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
