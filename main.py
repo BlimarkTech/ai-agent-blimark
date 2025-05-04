@@ -44,11 +44,21 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Utilidades para cargar archivos de Supabase Storage
 # ----------------------------
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
+    """
+    Descarga un archivo de Supabase Storage y lo retorna como texto (utf-8) o bytes.
+    Lanza RuntimeError si hay error o el archivo no existe.
+    """
     response = supabase.storage.from_(bucket).download(file_path)
+    # Manejo robusto según versión del SDK
+    if hasattr(response, "error") and response.error:
+        raise RuntimeError(f"Error descargando archivo: {response.error}")
     if hasattr(response, "data"):
         data = response.data
-        return data.decode("utf-8") if as_text else data
-    raise RuntimeError(f"No se pudo descargar {file_path} desde el bucket {bucket}")
+    elif isinstance(response, bytes):
+        data = response
+    else:
+        raise RuntimeError(f"No se pudo descargar {file_path} desde el bucket {bucket}")
+    return data.decode("utf-8") if as_text else data
 
 def load_system_message():
     return load_supabase_file(SUPABASE_BUCKET, "system_message.md", as_text=True)
