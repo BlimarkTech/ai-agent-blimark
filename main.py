@@ -76,22 +76,31 @@ SYSTEM_MESSAGE = """
             2. Indica que ya puedes enviarle el enlace.
             3. Incluye el enlace real de agendamiento de reuniones, recuperado del vector store, en tu respuesta final al usuario.
             4. Si usas un placeholder en la respuesta final acompáñalo del enlace real; solo entrega el enlace real si lo encuentras en el vector store. Si no lo encuentras, indícalo con transparencia.
-            4. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones del vector store.
-            5. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
+            5. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones del vector store.
+            6. NO hagas más preguntas en esta respuesta. Asegúrate de generar este texto.
     - **Si el usuario RECHAZA compartir datos:**
         - Insiste *una sola vez*.
         - Si sigue negándose, no insistas más y envía directamente el placeholder `[Agendar Cita]` con el enlace para el agendamiento de reuniones.
 6. **Resolución de dudas (General):**
 - Usa SIEMPRE el vector store para resolver cualquier duda sobre la empresa y sus servicios.
+
 ---
+
 **IMPORTANTE:**
 Siempre que debas solicitar datos al usuario para cualquier proceso (agendar, cotizar, etc.), consulta en el vector store la lista de campos requeridos para ese proceso y pide exactamente esos datos, usando los nombres y el orden en que aparecen.
+
 Nunca inventes ni omitas campos. Si la lista cambia en el vector store, debes adaptarte automáticamente.
+
 ---
+
 ### **Restricciones**
+
 1. **Uso exclusivo del vector store:** Toda información de la empresa (contacto, servicios, URL agendamiento) DEBE venir de ahí. No inventes datos ni enlaces. Si no encuentras un dato en el vector store, responde con transparencia que no dispones de esa información.
+
 2. **Preguntas no relacionadas:** No las respondas. Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
+
 3. **Transparencia y límites:** Usa frases cortas (<500 caracteres). Sé claro sobre lo que no sabes.
+
 4. **Placeholder para enlace:** Usa siempre `[Agendar Cita]` para el enlace de agendamiento de reuniones obtenido del vector store en tu respuesta final al usuario.
 """
 
@@ -153,19 +162,6 @@ async def handle_function_call(function_call):
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# Generador de fallback post-función
-# ----------------------------
-def generate_fallback_post_fc_message(result: dict, fc_msg) -> str:
-    if result.get("success"):
-        try:
-            name = json.loads(fc_msg.arguments).get("nombre", "")
-        except:
-            name = ""
-        saludo = f"¡Muchas gracias, {name}! Hemos recibido tu información correctamente." if name else "¡Muchas gracias! Hemos recibido tu información correctamente."
-        return saludo
-    return "Lo siento, hubo un problema al procesar la información. Por favor, inténtalo de nuevo."
-
-# ----------------------------
 # Endpoint /chat
 # ----------------------------
 @app.post("/chat")
@@ -204,19 +200,36 @@ async def chat(request: ChatRequest = Body(...)):
             logger.info(f"Función detectada: {detected_fc.name}")
             # Validar datos antes de exportar
             args = json.loads(detected_fc.arguments)
-            campos_obligatorios = ["nombre", "email", "mensaje"]
+            campos_obligatorios = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
             faltan = [campo for campo in campos_obligatorios if not args.get(campo)]
             if faltan:
                 texto = "Para agendar la reunión necesito: " + ", ".join(faltan) + ". ¿Podrías indicármelos?"
                 logger.info(f"Faltan datos: {faltan}. Solicitando al usuario.")
                 return JSONResponse(content={"response": texto}, media_type="application/json; charset=utf-8")
-            # Si tiene los datos, sigue el flujo normal
+            # Ejecuta la función normalmente
             fc_result = await handle_function_call(detected_fc)
-            final_text = generate_fallback_post_fc_message(fc_result, detected_fc)
+            # Añade mensaje de agradecimiento al historial
+            messages.append({
+                "role": "assistant",
+                "content": f"¡Muchas gracias, {args.get('nombre', '')}! Hemos recibido tu información correctamente."
+            })
+            # Segunda llamada a la API para que el modelo genere la respuesta final con el enlace real
+            response2 = await openai_client.responses.create(
+                model="gpt-4.1",
+                input=messages,
+                tools=tools
+            )
+            final_text = ""
+            for item in response2.output:
+                if getattr(item, "content", None):
+                    for chunk in item.content:
+                        final_text += getattr(chunk, "text", "")
+            logger.info(f"Respuesta final: {final_text}")
+            return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
         else:
             # Sólo texto sin función
             final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
-        
+
         logger.info(f"Respuesta final: {final_text}")
         return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
