@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from openai import AsyncOpenAI, BadRequestError
+from supabase import create_client, Client
 
 # ----------------------------
 # Configuración de logging
@@ -18,12 +19,35 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ----------------------------
-# Cliente OpenAI
+# Variables de entorno y clientes
 # ----------------------------
-openai_api_key = os.getenv("OPENAI_API_KEY")
-if not openai_api_key:
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
+
+if not OPENAI_API_KEY:
     logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
-openai_client = AsyncOpenAI(api_key=openai_api_key)
+if not SUPABASE_URL or not SUPABASE_KEY:
+    logger.error("¡Las variables de entorno SUPABASE_URL y SUPABASE_KEY no están configuradas!")
+if not WEBHOOK_URL:
+    logger.warning("La URL del Webhook no está configurada. La exportación de leads no funcionará.")
+if not VECTOR_STORE_ID:
+    logger.error("¡La variable de entorno VECTOR_STORE_ID no está configurada!")
+
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def get_enlace_agenda():
+    try:
+        response = supabase.table("datos_criticos").select("valor").eq("clave", "enlace_agenda").execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]['valor']
+        return None
+    except Exception as e:
+        logger.error(f"Error consultando base estructurada: {e}")
+        return None
 
 # ----------------------------
 # FastAPI app y CORS
@@ -75,9 +99,9 @@ SYSTEM_MESSAGE = """
         - **Después de la llamada a función exitosa:**
             1. Agradece explícitamente al usuario por compartir sus datos.
             2. Indica que ya puedes enviarle el enlace.
-            3. **Incluye el enlace real de agendamiento de reuniones, recuperado del vector store, en tu respuesta final al usuario.**
+            3. **Incluye el enlace real de agendamiento de reuniones, recuperado de la base estructurada, en tu respuesta final al usuario.**
             4. Si no encuentras el enlace, indícalo con transparencia.
-            5. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones del vector store.
+            5. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones de la base estructurada.
             6. No hagas más preguntas en esta respuesta.
     - **Si el usuario RECHAZA compartir datos:**
         - Insiste *una sola vez*.
@@ -95,7 +119,7 @@ SYSTEM_MESSAGE = """
 ---
 
 ### **Restricciones**
-1. **Enlace de agendamiento**: SIEMPRE que ejecutes la función "recolectarInformacionContacto" con la finalidad de agendar una reunión, debes agregar a la respuesta post-función el **enlace de agendamiento de citas**, este enlace deber obtenerlo del vector store e incluirlo en la respuesta post-función tal como si el usuario te estuviera preguntando: ¿cuál es el enlace para agendar una cita?.
+1. **Enlace de agendamiento**: SIEMPRE que ejecutes la función "recolectarInformacionContacto" con la finalidad de agendar una reunión, debes agregar a la respuesta post-función el **enlace de agendamiento de citas**. Este enlace debe obtenerse de la base estructurada e incluirse en la respuesta post-función tal como si el usuario te estuviera preguntando: ¿cuál es el enlace para agendar una cita?
 2. **Uso exclusivo del vector store:** Toda información de la empresa (contacto, servicios, URL agendamiento de citas) DEBE venir de ahí. No inventes datos ni enlaces, no alucines. Si no encuentras un dato en el vector store, responde con transparencia que no dispones de esa información.
 3. **Preguntas no relacionadas:** No las respondas. Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
 4. **Transparencia y límites:** Usa frases cortas (<500 caracteres). Sé claro sobre lo que no sabes.
@@ -107,7 +131,7 @@ SYSTEM_MESSAGE = """
 tools = [
     {
         "type": "file_search",
-        "vector_store_ids": ["vs_UJO3EkBk4HnIk1M0Ivv7Wmnz"]
+        "vector_store_ids": [VECTOR_STORE_ID]
     },
     {
         "type": "function",
@@ -132,16 +156,6 @@ tools = [
         }
     }
 ]
-
-# ----------------------------
-# Webhook externo para leads
-# ----------------------------
-WEBHOOK_URL = os.getenv(
-    "WEBHOOK_URL",
-    "https://hook.eu2.make.com/9dmymw72hxvg4tlh412q7m5g7vgfpqo9"
-)
-if not WEBHOOK_URL:
-    logger.warning("La URL del Webhook no está configurada. La exportación de leads no funcionará.")
 
 # ----------------------------
 # Función para ejecutar la llamada
@@ -223,11 +237,16 @@ async def chat(request: ChatRequest = Body(...)):
                 input=messages,
                 tools=tools
             )
+            # Recupera el enlace real de la base estructurada
+            enlace_agenda = get_enlace_agenda()
             final_text = ""
             for item in response2.output:
                 if getattr(item, "content", None):
                     for chunk in item.content:
                         final_text += getattr(chunk, "text", "")
+            # Si el modelo inventa o no incluye el enlace, lo agregamos seguro al final
+            if enlace_agenda and enlace_agenda not in final_text:
+                final_text += f"\n\nEnlace oficial para agendar tu cita: {enlace_agenda}"
             logger.info(f"Respuesta final: {final_text}")
             return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
         else:
