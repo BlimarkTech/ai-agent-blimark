@@ -207,13 +207,12 @@ async def chat(request: ChatRequest = Body(...)):
                 return JSONResponse(content={"response": texto}, media_type="application/json; charset=utf-8")
             # Ejecuta la función normalmente
             fc_result = await handle_function_call(detected_fc)
-            # Añade al historial el mensaje function_call original
+            # Añade al historial el mensaje de function_call
             messages.append({
-                "role": "assistant",
                 "type": "function_call",
+                "call_id": detected_fc.call_id,
                 "name": detected_fc.name,
-                "arguments": detected_fc.arguments,
-                "call_id": detected_fc.call_id
+                "arguments": detected_fc.arguments
             })
             # Añade el output de la función
             messages.append({
@@ -234,6 +233,12 @@ async def chat(request: ChatRequest = Body(...)):
                         final_text += getattr(chunk, "text", "")
             logger.info(f"Respuesta final: {final_text}")
             return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
+        else:
+            # Sólo texto sin función
+            final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
+
+        logger.info(f"Respuesta final: {final_text}")
+        return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
