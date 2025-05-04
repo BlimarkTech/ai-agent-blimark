@@ -198,7 +198,6 @@ async def chat(request: ChatRequest = Body(...)):
         # Si hay llamada a función
         if detected_fc:
             logger.info(f"Función detectada: {detected_fc.name}")
-            # Validar datos antes de exportar
             args = json.loads(detected_fc.arguments)
             campos_obligatorios = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
             faltan = [campo for campo in campos_obligatorios if not args.get(campo)]
@@ -208,12 +207,21 @@ async def chat(request: ChatRequest = Body(...)):
                 return JSONResponse(content={"response": texto}, media_type="application/json; charset=utf-8")
             # Ejecuta la función normalmente
             fc_result = await handle_function_call(detected_fc)
-            # Añade mensaje de agradecimiento al historial
+            # Añade al historial el mensaje function_call original
             messages.append({
                 "role": "assistant",
-                "content": f"¡Muchas gracias, {args.get('nombre', '')}! Hemos recibido tu información correctamente."
+                "type": "function_call",
+                "name": detected_fc.name,
+                "arguments": detected_fc.arguments,
+                "call_id": detected_fc.call_id
             })
-            # Segunda llamada a la API para que el modelo genere la respuesta final con el enlace real
+            # Añade el output de la función
+            messages.append({
+                "type": "function_call_output",
+                "call_id": detected_fc.call_id,
+                "output": json.dumps(fc_result)
+            })
+            # Segunda llamada a la API para que el modelo genere la respuesta final
             response2 = await openai_client.responses.create(
                 model="gpt-4.1",
                 input=messages,
@@ -226,12 +234,6 @@ async def chat(request: ChatRequest = Body(...)):
                         final_text += getattr(chunk, "text", "")
             logger.info(f"Respuesta final: {final_text}")
             return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
-        else:
-            # Sólo texto sin función
-            final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
-
-        logger.info(f"Respuesta final: {final_text}")
-        return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
