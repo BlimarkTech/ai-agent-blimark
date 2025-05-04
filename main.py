@@ -26,6 +26,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config")  # Bucket donde están los archivos
 
 if not OPENAI_API_KEY:
     logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
@@ -39,6 +40,38 @@ if not VECTOR_STORE_ID:
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ----------------------------
+# Utilidades para cargar archivos de Supabase Storage
+# ----------------------------
+def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
+    response = supabase.storage.from_(bucket).download(file_path)
+    if hasattr(response, "data"):
+        data = response.data
+        return data.decode("utf-8") if as_text else data
+    raise RuntimeError(f"No se pudo descargar {file_path} desde el bucket {bucket}")
+
+def load_system_message():
+    return load_supabase_file(SUPABASE_BUCKET, "system_message.md", as_text=True)
+
+def load_tools():
+    tools_json = load_supabase_file(SUPABASE_BUCKET, "functions.json", as_text=True)
+    return json.loads(tools_json)
+
+# ----------------------------
+# Carga dinámica de instrucciones y tools
+# ----------------------------
+SYSTEM_MESSAGE = load_system_message()
+custom_tools = load_tools()
+tools = [
+    {
+        "type": "file_search",
+        "vector_store_ids": [VECTOR_STORE_ID]
+    }
+] + custom_tools
+
+# ----------------------------
+# Función para obtener el enlace de agendamiento
+# ----------------------------
 def get_enlace_agenda():
     try:
         response = supabase.table("datos_criticos").select("valor").eq("clave", "enlace_agenda").execute()
@@ -67,95 +100,6 @@ app.add_middleware(
 # ----------------------------
 class ChatRequest(BaseModel):
     history: list  # Historial completo de mensajes
-
-# ----------------------------
-# Mensaje del sistema
-# ----------------------------
-SYSTEM_MESSAGE = """
-1. **Rol y objetivo:**
-- Actúa como agente de servicio al cliente de la empresa *Blimark Tech* (Agencia de inteligencia artificial aplicada al marketing).
-- Tu objetivo principal es responder consultas, captar leads y agendar reuniones.
-
-2. **Saludo, presentación y flujo:**
-- Saluda amablemente, preséntate y pregunta cómo ayudar.
-- Responde consultas sobre la empresa con frases claras/cortas (usa vector store).
-- Ignora preguntas no relacionadas.
-
-3. **Consulta datos de contacto de la empresa:**
-- Si el usuario pregunta por datos de la empresa, consúltalos en el vector store y dalos.
-
-4. **Consulta servicios y precios:**
-- Responde *únicamente* con información del vector store. Si no está, sugiere agendar reunión.
-
-5. **Programación de reuniones y Captura de Leads:**
-- Si el usuario muestra interés en contratar servicios, pregunta por precios o pide presupuesto:
-    - Antes de sugerir al usuario agendar reunión resuelve todas sus dudas sobre los servicios que desea contratar (usa vector store) y asegúrate de que no tenga más dudas.
-    - Sugiere agendar reunión y espera confirmación.
-    - **Si el usuario ACEPTA agendar la reunión:**
-        - Explica que necesitas datos para enviarle el enlace de agendamiento de citas.
-        - **Paso 1:** Intenta Inferir el 'mensaje' revisando el historial.
-        - **Paso 2:** Consulta en el vector store la lista de campos requeridos y pide exactamente esos datos.
-        - **Condición para llamar a la función:** Tan pronto como tengas los datos requeridos y el mensaje, llama a la función `recolectarInformacionContacto`. Pasa todos los datos recopilados (usa "" para los opcionales no obtenidos).
-        - **Después de la llamada a función exitosa:**
-            1. Agradece explícitamente al usuario por compartir sus datos.
-            2. Indica que ya puedes enviarle el enlace.
-            3. **Incluye el enlace real de agendamiento de reuniones, recuperado de la base estructurada, en tu respuesta final al usuario.**
-            4. Si no encuentras el enlace, indícalo con transparencia.
-            5. NO inventes enlaces de reunión, obtén el enlace real para agendar reuniones de la base estructurada.
-            6. No hagas más preguntas en esta respuesta.
-    - **Si el usuario RECHAZA compartir datos:**
-        - Insiste *una sola vez*.
-        - Si sigue negándose, finaliza cortésmente.
-
-6. **Resolución de dudas (General):**
-- Usa SIEMPRE el vector store para resolver cualquier duda sobre la empresa y sus servicios.
-
----
-
-### **MUY IMPORTANTE:**
-1. SIEMPRE que debas solicitar datos al usuario para cualquier proceso (agendar, cotizar, etc.), consulta en el vector store la lista de campos requeridos para ese proceso y pide exactamente esos datos, usando los nombres y el orden en que aparecen.
-2. NUNCA inventes ni omitas campos. Si la lista cambia en el vector store, debes adaptarte automáticamente.
-
----
-
-### **Restricciones**
-1. **Enlace de agendamiento**: SIEMPRE que ejecutes la función "recolectarInformacionContacto" con la finalidad de agendar una reunión, debes agregar a la respuesta post-función el **enlace de agendamiento de citas**. Este enlace debe obtenerse de la base estructurada e incluirse en la respuesta post-función tal como si el usuario te estuviera preguntando: ¿cuál es el enlace para agendar una cita?
-2. **Uso exclusivo del vector store:** Toda información de la empresa (contacto, servicios, URL agendamiento de citas) DEBE venir de ahí. No inventes datos ni enlaces, no alucines. Si no encuentras un dato en el vector store, responde con transparencia que no dispones de esa información.
-3. **Preguntas no relacionadas:** No las respondas. Indica que no puedes ayudar y, si insiste, finaliza cortésmente.
-4. **Transparencia y límites:** Usa frases cortas (<500 caracteres). Sé claro sobre lo que no sabes.
-"""
-
-# ----------------------------
-# Definición de tools
-# ----------------------------
-tools = [
-    {
-        "type": "file_search",
-        "vector_store_ids": [VECTOR_STORE_ID]
-    },
-    {
-        "type": "function",
-        "name": "recolectarInformacionContacto",
-        "description": (
-            "Recolecta información de contacto de un lead (nombre, apellidos, email, teléfono, país, mensaje) "
-            "y la envía a un webhook. Si un campo opcional no está disponible, enviar ''."
-        ),
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "nombre": {"type": "string"},
-                "apellidos": {"type": "string"},
-                "email": {"type": "string"},
-                "telefono": {"type": "string"},
-                "pais": {"type": "string"},
-                "mensaje": {"type": "string"},
-            },
-            "required": ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"],
-            "additionalProperties": False
-        }
-    }
-]
 
 # ----------------------------
 # Función para ejecutar la llamada
