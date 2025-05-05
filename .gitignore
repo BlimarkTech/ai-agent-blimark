@@ -1,10 +1,9 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
+# Ignorar entorno virtual
 .venv/
 
-# Environment files
+# Ignorar fichero de variables de entorno local
 .env
+
+# Ignorar caches de Python
+__pycache__/
+*.py[cod]
