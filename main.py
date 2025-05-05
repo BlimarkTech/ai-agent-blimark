@@ -4,13 +4,17 @@ import os
 import logging
 import json
 import requests
+from datetime import datetime, timedelta
 
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, HTTPException, Depends, Form, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel, EmailStr, validator
+
 from openai import AsyncOpenAI, BadRequestError
 from supabase import create_client, Client
+from jose import JWTError, jwt
 
 # ----------------------------
 # Configuración de logging
@@ -26,77 +30,86 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config")  # Bucket donde están los archivos
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config")
 
 if not OPENAI_API_KEY:
-    logger.error("¡La variable de entorno OPENAI_API_KEY no está configurada!")
+    logger.error("La variable de entorno OPENAI_API_KEY no está configurada")
 if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("¡Las variables de entorno SUPABASE_URL y SUPABASE_KEY no están configuradas!")
-if not WEBHOOK_URL:
-    logger.warning("La URL del Webhook no está configurada. La exportación de leads no funcionará.")
+    logger.error("Las variables de entorno SUPABASE_URL/SUPABASE_KEY no están configuradas")
 if not VECTOR_STORE_ID:
-    logger.error("¡La variable de entorno VECTOR_STORE_ID no está configurada!")
+    logger.error("La variable de entorno VECTOR_STORE_ID no está configurada")
+if not WEBHOOK_URL:
+    logger.warning("La variable de entorno WEBHOOK_URL no está configurada. Las exportaciones de leads no funcionarán")
 
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ----------------------------
-# Utilidades para cargar archivos de Supabase Storage
+# Configuración JWT
+# ----------------------------
+SECRET_KEY = os.getenv("SECRET_KEY", "clave-secreta-segura")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+
+def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token inválido o expirado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError:
+        raise credentials_exception
+
+# ----------------------------
+# Carga de archivos desde Supabase
 # ----------------------------
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
-    """
-    Descarga un archivo de Supabase Storage y lo retorna como texto (utf-8) o bytes.
-    Lanza RuntimeError si hay error o el archivo no existe.
-    """
-    response = supabase.storage.from_(bucket).download(file_path)
-    # Manejo robusto según versión del SDK
-    if hasattr(response, "error") and response.error:
-        raise RuntimeError(f"Error descargando archivo: {response.error}")
-    if hasattr(response, "data"):
-        data = response.data
-    elif isinstance(response, bytes):
-        data = response
-    else:
-        raise RuntimeError(f"No se pudo descargar {file_path} desde el bucket {bucket}")
+    resp = supabase.storage.from_(bucket).download(file_path)
+    if hasattr(resp, "error") and resp.error:
+        raise RuntimeError(f"Error descargando {file_path}: {resp.error}")
+    data = resp.data if hasattr(resp, "data") else resp
     return data.decode("utf-8") if as_text else data
 
-def load_system_message():
+def load_system_message() -> str:
     return load_supabase_file(SUPABASE_BUCKET, "system_message.md", as_text=True)
 
-def load_tools():
+def load_tools() -> list:
     tools_json = load_supabase_file(SUPABASE_BUCKET, "functions.json", as_text=True)
     return json.loads(tools_json)
 
-# ----------------------------
-# Carga dinámica de instrucciones y tools
-# ----------------------------
 SYSTEM_MESSAGE = load_system_message()
 custom_tools = load_tools()
-tools = [
-    {
-        "type": "file_search",
-        "vector_store_ids": [VECTOR_STORE_ID]
-    }
-] + custom_tools
+tools = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
 
 # ----------------------------
-# Función para obtener el enlace de agendamiento
+# Obtención de enlace de agenda
 # ----------------------------
-def get_enlace_agenda():
+def get_enlace_agenda() -> str | None:
     try:
-        response = supabase.table("datos_criticos").select("valor").eq("clave", "enlace_agenda").execute()
-        if response.data and len(response.data) > 0:
-            return response.data[0]['valor']
-        return None
+        resp = supabase.table("datos_criticos").select("valor").eq("clave", "enlace_agenda").execute()
+        if resp.data and len(resp.data) > 0:
+            return resp.data[0]["valor"]
     except Exception as e:
-        logger.error(f"Error consultando base estructurada: {e}")
-        return None
+        logger.error(f"Error consultando enlace_agenda: {e}")
+    return None
 
 # ----------------------------
 # FastAPI app y CORS
 # ----------------------------
 app = FastAPI()
-origins = ["*"]
+
+origins = ["https://blimark.tech"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -106,50 +119,63 @@ app.add_middleware(
 )
 
 # ----------------------------
-# Modelo de petición
+# Modelos de datos
 # ----------------------------
 class ChatRequest(BaseModel):
-    history: list  # Historial completo de mensajes
+    history: list
+
+    @validator("history", pre=True, each_item=False)
+    def max_history_length(cls, v):
+        if not isinstance(v, list):
+            raise ValueError("history debe ser una lista de mensajes")
+        if len(v) > 200:
+            return v[-200:]
+        return v
 
 # ----------------------------
-# Función para ejecutar la llamada
+# Llamadas a funciones externas
 # ----------------------------
-async def handle_function_call(function_call):
+async def handle_function_call(function_call) -> dict:
     if function_call.name != "recolectarInformacionContacto":
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
-        response = requests.post(WEBHOOK_URL, json=args)
-        response.raise_for_status()
-        return {"success": True, "status_code": response.status_code}
+        # Validación de email básica
+        if "email" in args:
+            EmailStr.validate(args["email"])
+        resp = requests.post(WEBHOOK_URL, json=args, timeout=5)
+        resp.raise_for_status()
+        return {"success": True, "status_code": resp.status_code}
     except Exception as e:
         logger.error(f"Error en handle_function_call: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# Endpoint /chat
+# Endpoint de login /token
 # ----------------------------
-@app.post("/chat")
+@app.post("/token")
+async def login(username: str = Form(...), password: str = Form(...)):
+    # Reemplaza esta validación por tu propio sistema de usuarios
+    if username == "admin" and password == "1234":
+        token = create_access_token(data={"sub": username})
+        return {"access_token": token, "token_type": "bearer"}
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales incorrectas")
+
+# ----------------------------
+# Endpoint protegido /chat
+# ----------------------------
+@app.post("/chat", dependencies=[Depends(verify_token)])
 async def chat(request: ChatRequest = Body(...)):
     history = request.history or []
-    logger.info(f"Historial recibido: {history}")
-
-    # Construir mensajes de entrada
+    logger.info(f"Historial recibido ({len(history)} ítems)")
     messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + history
-    if len(messages) > 201:
-        messages = [messages[0]] + messages[-200:]
-
     try:
-        # Primera llamada a la Responses API
-        logger.info("Realizando primera llamada a OpenAI...")
+        # Primera llamada a GPT-4.1
         response1 = await openai_client.responses.create(
             model="gpt-4.1",
             input=messages,
             tools=tools
         )
-        logger.info(f"Output primera llamada: {response1.output}")
-
-        # Detectar function_call o texto normal
         detected_fc = None
         initial_text = ""
         for item in response1.output:
@@ -160,55 +186,43 @@ async def chat(request: ChatRequest = Body(...)):
                 for chunk in item.content:
                     initial_text += getattr(chunk, "text", "")
 
-        # Si hay llamada a función
         if detected_fc:
-            logger.info(f"Función detectada: {detected_fc.name}")
             args = json.loads(detected_fc.arguments)
-            campos_obligatorios = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
-            faltan = [campo for campo in campos_obligatorios if not args.get(campo)]
-            if faltan:
-                texto = "Para agendar la reunión necesito: " + ", ".join(faltan) + ". ¿Podrías indicármelos?"
-                logger.info(f"Faltan datos: {faltan}. Solicitando al usuario.")
+            required = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
+            missing = [f for f in required if not args.get(f)]
+            if missing:
+                texto = f"Para agendar necesito: {', '.join(missing)}. ¿Podrías proporcionarlos?"
                 return JSONResponse(content={"response": texto}, media_type="application/json; charset=utf-8")
-            # Ejecuta la función normalmente
+
+            # Ejecutar función externa
             fc_result = await handle_function_call(detected_fc)
-            # Añade al historial el mensaje de function_call
-            messages.append({
-                "type": "function_call",
-                "call_id": detected_fc.call_id,
-                "name": detected_fc.name,
-                "arguments": detected_fc.arguments
-            })
-            # Añade el output de la función
-            messages.append({
-                "type": "function_call_output",
-                "call_id": detected_fc.call_id,
-                "output": json.dumps(fc_result)
-            })
-            # Segunda llamada a la API para que el modelo genere la respuesta final
+            # Añadir registros al historial
+            messages.append({"type": "function_call", "call_id": detected_fc.call_id,
+                             "name": detected_fc.name, "arguments": detected_fc.arguments})
+            messages.append({"type": "function_call_output", "call_id": detected_fc.call_id,
+                             "output": json.dumps(fc_result)})
+
+            # Segunda llamada para respuesta final
             response2 = await openai_client.responses.create(
                 model="gpt-4.1",
                 input=messages,
                 tools=tools
             )
-            # Recupera el enlace real de la base estructurada
-            enlace_agenda = get_enlace_agenda()
             final_text = ""
             for item in response2.output:
                 if getattr(item, "content", None):
                     for chunk in item.content:
                         final_text += getattr(chunk, "text", "")
-            # Si el modelo inventa o no incluye el enlace, lo agregamos seguro al final
-            if enlace_agenda and enlace_agenda not in final_text:
-                final_text += f"\n\nEnlace oficial para agendar tu cita: {enlace_agenda}"
-            logger.info(f"Respuesta final: {final_text}")
-            return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
-        else:
-            # Sólo texto sin función
-            final_text = initial_text or "Lo siento, no pude generar una respuesta válida."
 
-        logger.info(f"Respuesta final: {final_text}")
-        return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
+            enlace = get_enlace_agenda()
+            if enlace and enlace not in final_text:
+                final_text += f"\n\nEnlace para agendar tu cita: {enlace}"
+
+            return JSONResponse(content={"response": final_text}, media_type="application/json; charset=utf-8")
+
+        # Si no hay llamada a función, devolver texto directo
+        return JSONResponse(content={"response": initial_text or "No pude generar una respuesta."},
+                            media_type="application/json; charset=utf-8")
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
@@ -216,9 +230,3 @@ async def chat(request: ChatRequest = Body(...)):
     except Exception as e:
         logger.error(f"Error en /chat: {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"error": "Error interno inesperado."})
-
-# Descomenta para ejecutar localmente con uvicorn
-# if __name__ == "__main__":
-#     import uvicorn
-#     port = int(os.getenv("PORT", 8000))
-#     uvicorn.run(app, host="0.0.0.0", port=port)
