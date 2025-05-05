@@ -76,7 +76,6 @@ app.add_middleware(
 # Evento de arranque (startup)
 @app.on_event("startup")
 async def startup_event():
-    # Aquí podrías reconectar o asignar recursos a app.state si lo deseas
     logger.info("Aplicación iniciada: clientes de OpenAI y Supabase listos")
 
 # Health check
@@ -85,7 +84,7 @@ def healthz():
     return {"status": "ok"}
 
 # ----------------------------
-# Funciones de JWT
+# Funciones auxiliares
 # ----------------------------
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
@@ -107,9 +106,6 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
     except JWTError:
         raise credentials_exception
 
-# ----------------------------
-# Consulta de usuario en Supabase
-# ----------------------------
 
 def get_user(username: str) -> dict | None:
     resp = (
@@ -122,9 +118,6 @@ def get_user(username: str) -> dict | None:
     logger.info(f"Supabase get_user resp: {resp.data}")
     return resp.data
 
-# ----------------------------
-# Carga de archivos desde Supabase Storage
-# ----------------------------
 
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
     resp = supabase.storage.from_(bucket).download(file_path)
@@ -146,9 +139,20 @@ SYSTEM_MESSAGE = load_system_message()
 custom_tools   = load_tools()
 tools = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
 
-# ----------------------------
-# Envío de datos a través de webhook
-# ----------------------------
+
+def get_enlace_agenda() -> str | None:
+    try:
+        resp = (
+            supabase.table("datos_criticos")
+                    .select("valor")
+                    .eq("clave", "enlace_agenda")
+                    .execute()
+        )
+        if resp.data and len(resp.data) > 0:
+            return resp.data[0]["valor"]
+    except Exception as e:
+        logger.error(f"Error consultando enlace_agenda: {e}")
+    return None
 
 async def handle_function_call(function_call) -> dict:
     if function_call.name != "recolectarInformacionContacto":
@@ -163,10 +167,6 @@ async def handle_function_call(function_call) -> dict:
     except Exception as e:
         logger.error(f"Error en handle_function_call: {e}", exc_info=True)
         return {"success": False, "error": str(e)}
-
-# ----------------------------
-# Modelos de datos
-# ----------------------------
 
 class ChatRequest(BaseModel):
     history: list
