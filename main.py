@@ -143,13 +143,13 @@ async def handle_function_call(function_call) -> dict:
 # FastAPI app & CORS
 # ----------------------------
 app = FastAPI()
-origins = ["https://blimark.tech", "https://api.blimark.tech"]
+origins = ["https://blimark.tech", "https://api.blimark.tech"] # Asegúrate de incluir cualquier dominio de Botpress si es necesario (ej. el de tu Studio o el del Webchat)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origins, # Considera usar ["*"] temporalmente para depurar problemas de CORS
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False,
+    allow_credentials=False, # Cambia a True si envías cookies o encabezados de autenticación complejos que lo requieran
 )
 
 # ----------------------------
@@ -177,7 +177,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Contraseña incorrecta")
     token = create_access_token(data={"sub": user["username"]})
-    return {"access_token": token, "token_type": "bearer"}
+    # Modificación para compatibilidad con Botpress HTTP Request card
+    return {"response": {"access_token": token, "token_type": "bearer"}}
 
 # ----------------------------
 # Protected chat endpoint (/chat)
