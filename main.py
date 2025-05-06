@@ -25,23 +25,23 @@ from core.hashing import Hasher
 load_dotenv()
 
 # ----------------------------
-# Configuración de logging
+# Logging
 # ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ----------------------------
-# Variables de entorno
+# Configuración desde env
 # ----------------------------
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL    = os.getenv("SUPABASE_URL")
-SUPABASE_KEY    = os.getenv("SUPABASE_KEY")
-WEBHOOK_URL     = os.getenv("WEBHOOK_URL", "")
-VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config")
-SECRET_KEY      = os.getenv("SECRET_KEY", "clave-secreta-segura")
-ALGORITHM       = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+OPENAI_API_KEY            = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL             = os.getenv("SUPABASE_URL")
+SUPABASE_KEY             = os.getenv("SUPABASE_KEY")
+WEBHOOK_URL              = os.getenv("WEBHOOK_URL", "")
+VECTOR_STORE_ID          = os.getenv("VECTOR_STORE_ID")
+SUPABASE_BUCKET          = os.getenv("SUPABASE_BUCKET", "config")
+SECRET_KEY               = os.getenv("SECRET_KEY", "clave-secreta-segura")
+ALGORITHM                = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MIN  = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 if not OPENAI_API_KEY:
     logger.error("Falta OPENAI_API_KEY")
@@ -51,24 +51,24 @@ if not VECTOR_STORE_ID:
     logger.error("Falta VECTOR_STORE_ID")
 
 # ----------------------------
-# Clientes de API
+# Clientes
 # ----------------------------
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ----------------------------
-# Configuración JWT
+# JWT & Auth
 # ----------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
 def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MIN))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
-    credentials_exception = HTTPException(
+    creds_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token inválido o expirado",
         headers={"WWW-Authenticate": "Bearer"},
@@ -76,21 +76,18 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
-        raise credentials_exception
+        raise creds_exc
 
-# ----------------------------
-# Autenticación: consulta de usuario
-# ----------------------------
-def get_user(username: str) -> dict | None:
+def get_user(username: str) -> dict|None:
     resp = supabase.table("users") \
                    .select("username, hashed_password") \
                    .eq("username", username) \
                    .single().execute()
-    logger.info(f"Supabase get_user resp: {resp.data}")
+    logger.info(f"Supabase get_user resp.data={resp.data}")
     return resp.data
 
 # ----------------------------
-# Carga de archivos y herramientas
+# Carga de archivos desde Supabase
 # ----------------------------
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
     resp = supabase.storage.from_(bucket).download(file_path)
@@ -113,7 +110,7 @@ tools          = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}
 # ----------------------------
 # Enlace de agenda
 # ----------------------------
-def get_enlace_agenda() -> str | None:
+def get_enlace_agenda() -> str|None:
     try:
         resp = supabase.table("datos_criticos") \
                        .select("valor") \
@@ -126,7 +123,7 @@ def get_enlace_agenda() -> str | None:
     return None
 
 # ----------------------------
-# Función externa de webhook
+# Función externa
 # ----------------------------
 async def handle_function_call(function_call) -> dict:
     if function_call.name != "recolectarInformacionContacto":
@@ -143,7 +140,7 @@ async def handle_function_call(function_call) -> dict:
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# FastAPI y CORS
+# FastAPI app & CORS
 # ----------------------------
 app = FastAPI()
 origins = ["https://blimark.tech", "https://api.blimark.tech"]
@@ -168,35 +165,35 @@ class ChatRequest(BaseModel):
         return v[-200:] if len(v) > 200 else v
 
 # ----------------------------
-# Endpoint de login (/token)
+# Login endpoint (/token)
 # ----------------------------
 @app.post("/token")
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = get_user(form_data.username)
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Usuario no encontrado")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Usuario no encontrado")
     if not Hasher.verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Contraseña incorrecta")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Contraseña incorrecta")
     token = create_access_token(data={"sub": user["username"]})
     return {"access_token": token, "token_type": "bearer"}
 
 # ----------------------------
-# Endpoint protegido (/chat)
+# Protected chat endpoint (/chat)
 # ----------------------------
 @app.post("/chat", dependencies=[Depends(verify_token)])
 async def chat(request: ChatRequest = Body(...)):
     history = request.history or []
     logger.info(f"Historial recibido: {len(history)} ítems")
     messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + history
+
     try:
         # Primera llamada a GPT
         response1 = await openai_client.responses.create(
-            model="gpt-4.1",
-            input=messages,
-            tools=tools
+            model="gpt-4.1", input=messages, tools=tools
         )
-        detected_fc = None
-        initial_text = ""
+        detected_fc, initial_text = None, ""
         for item in response1.output:
             if getattr(item, "type", "") == "function_call":
                 detected_fc = item
@@ -211,38 +208,33 @@ async def chat(request: ChatRequest = Body(...)):
             missing = [f for f in required if not args.get(f)]
             if missing:
                 texto = f"Para agendar necesito: {', '.join(missing)}. ¿Podrías proporcionarlos?"
-                return JSONResponse(content={"response": texto})
+                return JSONResponse(content={"response": {"type": "text", "text": texto}})
 
             fc_result = await handle_function_call(detected_fc)
-            messages.append({
-                "type": "function_call", "call_id": detected_fc.call_id,
-                "name": detected_fc.name, "arguments": detected_fc.arguments
-            })
-            messages.append({
-                "type": "function_call_output", "call_id": detected_fc.call_id,
-                "output": json.dumps(fc_result)
-            })
-
-            # Segunda llamada para respuesta final
+            messages += [
+                {"type": "function_call", "call_id": detected_fc.call_id,
+                 "name": detected_fc.name, "arguments": detected_fc.arguments},
+                {"type": "function_call_output", "call_id": detected_fc.call_id,
+                 "output": json.dumps(fc_result)}
+            ]
             response2 = await openai_client.responses.create(
-                model="gpt-4.1",
-                input=messages,
-                tools=tools
+                model="gpt-4.1", input=messages, tools=tools
             )
-            final_text = ""
-            for item in response2.output:
-                if getattr(item, "content", None):
-                    for chunk in item.content:
-                        final_text += getattr(chunk, "text", "")
-
+            final_text = "".join(
+                chunk.text
+                for itm in response2.output if getattr(itm, "content", None)
+                for chunk in itm.content
+            )
             enlace = get_enlace_agenda()
             if enlace and enlace not in final_text:
                 final_text += f"\n\nEnlace para agendar tu cita: {enlace}"
 
-            return JSONResponse(content={"response": final_text})
+            return JSONResponse(content={"response": {"type": "text", "text": final_text}})
 
-        # Si no hay función, devolvemos texto directo
-        return JSONResponse(content={"response": initial_text or "No pude generar una respuesta."})
+        # Sin llamada a función
+        return JSONResponse(content={
+            "response": {"type": "text", "text": initial_text or "No pude generar una respuesta."}
+        })
 
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
