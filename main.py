@@ -43,7 +43,6 @@ SECRET_KEY      = os.getenv("SECRET_KEY", "clave-secreta-segura")
 ALGORITHM       = os.getenv("ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
-# Validaciones mínimas
 if not OPENAI_API_KEY:
     logger.error("Falta OPENAI_API_KEY")
 if not SUPABASE_URL or not SUPABASE_KEY:
@@ -52,7 +51,7 @@ if not VECTOR_STORE_ID:
     logger.error("Falta VECTOR_STORE_ID")
 
 # ----------------------------
-# Clientes Singleton
+# Clientes de API
 # ----------------------------
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -75,24 +74,23 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        return payload
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
         raise credentials_exception
 
 # ----------------------------
-# Consulta de usuario en Supabase
+# Autenticación: consulta de usuario
 # ----------------------------
 def get_user(username: str) -> dict | None:
     resp = supabase.table("users") \
                    .select("username, hashed_password") \
                    .eq("username", username) \
                    .single().execute()
-    logger.info(f"Supabase get_user resp.data={resp.data}")
+    logger.info(f"Supabase get_user resp: {resp.data}")
     return resp.data
 
 # ----------------------------
-# Carga de archivos desde Supabase
+# Carga de archivos y herramientas
 # ----------------------------
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
     resp = supabase.storage.from_(bucket).download(file_path)
@@ -113,12 +111,14 @@ custom_tools   = load_tools()
 tools          = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
 
 # ----------------------------
-# Obtención de enlace de agenda
+# Enlace de agenda
 # ----------------------------
 def get_enlace_agenda() -> str | None:
     try:
-        resp = supabase.table("datos_criticos").select("valor") \
-                         .eq("clave", "enlace_agenda").execute()
+        resp = supabase.table("datos_criticos") \
+                       .select("valor") \
+                       .eq("clave", "enlace_agenda") \
+                       .execute()
         if resp.data:
             return resp.data[0]["valor"]
     except Exception as e:
@@ -126,7 +126,7 @@ def get_enlace_agenda() -> str | None:
     return None
 
 # ----------------------------
-# Manejo de llamadas a funciones externas
+# Función externa de webhook
 # ----------------------------
 async def handle_function_call(function_call) -> dict:
     if function_call.name != "recolectarInformacionContacto":
@@ -143,7 +143,7 @@ async def handle_function_call(function_call) -> dict:
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# FastAPI App y CORS
+# FastAPI y CORS
 # ----------------------------
 app = FastAPI()
 origins = ["https://blimark.tech", "https://api.blimark.tech"]
@@ -156,7 +156,7 @@ app.add_middleware(
 )
 
 # ----------------------------
-# Modelo de datos para /chat
+# Modelo de datos
 # ----------------------------
 class ChatRequest(BaseModel):
     history: list
@@ -214,10 +214,14 @@ async def chat(request: ChatRequest = Body(...)):
                 return JSONResponse(content={"response": texto})
 
             fc_result = await handle_function_call(detected_fc)
-            messages.append({"type": "function_call", "call_id": detected_fc.call_id,
-                             "name": detected_fc.name, "arguments": detected_fc.arguments})
-            messages.append({"type": "function_call_output", "call_id": detected_fc.call_id,
-                             "output": json.dumps(fc_result)})
+            messages.append({
+                "type": "function_call", "call_id": detected_fc.call_id,
+                "name": detected_fc.name, "arguments": detected_fc.arguments
+            })
+            messages.append({
+                "type": "function_call_output", "call_id": detected_fc.call_id,
+                "output": json.dumps(fc_result)
+            })
 
             # Segunda llamada para respuesta final
             response2 = await openai_client.responses.create(
@@ -225,17 +229,19 @@ async def chat(request: ChatRequest = Body(...)):
                 input=messages,
                 tools=tools
             )
-            final_text = "".join(
-                chunk.text
-                for item in response2.output if getattr(item, "content", None)
-                for chunk in item.content
-            )
+            final_text = ""
+            for item in response2.output:
+                if getattr(item, "content", None):
+                    for chunk in item.content:
+                        final_text += getattr(chunk, "text", "")
+
             enlace = get_enlace_agenda()
             if enlace and enlace not in final_text:
                 final_text += f"\n\nEnlace para agendar tu cita: {enlace}"
+
             return JSONResponse(content={"response": final_text})
 
-        # Sin función, devolvemos texto directo
+        # Si no hay función, devolvemos texto directo
         return JSONResponse(content={"response": initial_text or "No pude generar una respuesta."})
 
     except BadRequestError as e:
