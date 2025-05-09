@@ -26,7 +26,7 @@ from core.hashing import Hasher
 load_dotenv()
 
 # ----------------------------
-# Configuración de logging
+# Logging
 # ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
-    credentials_exception = HTTPException(
+    cred_exc = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token inválido o expirado",
         headers={"WWW-Authenticate": "Bearer"},
@@ -77,17 +77,17 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
-        raise credentials_exception
+        raise cred_exc
 
 # ----------------------------
-# Función para consultar usuario en Supabase
+# Consulta de usuario en Supabase
 # ----------------------------
 def get_user(username: str) -> dict | None:
     resp = supabase.table("users") \
                    .select("username, hashed_password") \
                    .eq("username", username) \
                    .single().execute()
-    logger.info(f"Supabase get_user resp.data={resp.data}")
+    logger.info(f"Supabase get_user resp: {resp.data}")
     return resp.data
 
 # ----------------------------
@@ -203,7 +203,6 @@ async def chat(request: ChatRequest = Body(...)):
                 for chunk in item.content:
                     initial_text += getattr(chunk, "text", "")
 
-        # Si hay llamada a función
         if detected_fc:
             args = json.loads(detected_fc.arguments)
             required = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
@@ -233,7 +232,7 @@ async def chat(request: ChatRequest = Body(...)):
 
             return JSONResponse(content={"response": {"type": "text", "text": final_text}})
 
-        # Si no hay función, devolvemos texto directo
+        # Si no hay llamada a función
         return JSONResponse(content={
             "response": {"type": "text", "text": initial_text or "No pude generar una respuesta."}
         })
