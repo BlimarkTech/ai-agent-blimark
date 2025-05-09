@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, Body, HTTPException, Depends, Form, status
+from fastapi import FastAPI, Body, HTTPException, Depends, Form, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -169,10 +169,21 @@ class ChatRequest(BaseModel):
         return v[-200:] if len(v) > 200 else v
 
 # ----------------------------
-# Endpoint de login (/token)
+# Endpoint de login (/token) compatible JSON y form-data
 # ----------------------------
 @app.post("/token")
-async def login(username: str = Form(...), password: str = Form(...)):
+async def login(request: Request):
+    try:
+        # Intenta primero como JSON
+        data = await request.json()
+        username = data.get("username")
+        password = data.get("password")
+    except Exception:
+        # Si falla, intenta como form-data
+        form = await request.form()
+        username = form.get("username")
+        password = form.get("password")
+
     user = get_user(username)
     if not user or not Hasher.verify_password(password, user["hashed_password"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
