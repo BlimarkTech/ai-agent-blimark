@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import os
 import logging
 import json
@@ -7,10 +8,10 @@ from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, Body, HTTPException, Depends, status
+from fastapi import FastAPI, Body, HTTPException, Depends, Form, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordRequestForm, OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, EmailStr, validator
 
 from openai import AsyncOpenAI, BadRequestError
@@ -25,7 +26,7 @@ from core.hashing import Hasher
 load_dotenv()
 
 # ----------------------------
-# Logging
+# Configuración de logging
 # ----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -33,15 +34,15 @@ logger = logging.getLogger(__name__)
 # ----------------------------
 # Configuración desde env
 # ----------------------------
-OPENAI_API_KEY            = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL             = os.getenv("SUPABASE_URL")
-SUPABASE_KEY             = os.getenv("SUPABASE_KEY")
-WEBHOOK_URL              = os.getenv("WEBHOOK_URL", "")
-VECTOR_STORE_ID          = os.getenv("VECTOR_STORE_ID")
-SUPABASE_BUCKET          = os.getenv("SUPABASE_BUCKET", "config")
-SECRET_KEY               = os.getenv("SECRET_KEY", "clave-secreta-segura")
-ALGORITHM                = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MIN  = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+OPENAI_API_KEY           = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL            = os.getenv("SUPABASE_URL")
+SUPABASE_KEY            = os.getenv("SUPABASE_KEY")
+WEBHOOK_URL             = os.getenv("WEBHOOK_URL", "")
+VECTOR_STORE_ID         = os.getenv("VECTOR_STORE_ID")
+SUPABASE_BUCKET         = os.getenv("SUPABASE_BUCKET", "config")
+SECRET_KEY              = os.getenv("SECRET_KEY", "clave-secreta-segura")
+ALGORITHM               = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 if not OPENAI_API_KEY:
     logger.error("Falta OPENAI_API_KEY")
@@ -51,13 +52,13 @@ if not VECTOR_STORE_ID:
     logger.error("Falta VECTOR_STORE_ID")
 
 # ----------------------------
-# Clientes
+# Clientes de API
 # ----------------------------
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ----------------------------
-# JWT & Auth
+# Configuración JWT y seguridad
 # ----------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
@@ -68,7 +69,7 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
-    creds_exc = HTTPException(
+    credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Token inválido o expirado",
         headers={"WWW-Authenticate": "Bearer"},
@@ -76,9 +77,12 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
     try:
         return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
     except JWTError:
-        raise creds_exc
+        raise credentials_exception
 
-def get_user(username: str) -> dict|None:
+# ----------------------------
+# Función para consultar usuario en Supabase
+# ----------------------------
+def get_user(username: str) -> dict | None:
     resp = supabase.table("users") \
                    .select("username, hashed_password") \
                    .eq("username", username) \
@@ -108,9 +112,9 @@ custom_tools   = load_tools()
 tools          = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
 
 # ----------------------------
-# Enlace de agenda
+# Obtención de enlace de agenda
 # ----------------------------
-def get_enlace_agenda() -> str|None:
+def get_enlace_agenda() -> str | None:
     try:
         resp = supabase.table("datos_criticos") \
                        .select("valor") \
@@ -123,7 +127,7 @@ def get_enlace_agenda() -> str|None:
     return None
 
 # ----------------------------
-# Función externa
+# Manejo de llamadas a funciones externas
 # ----------------------------
 async def handle_function_call(function_call) -> dict:
     if function_call.name != "recolectarInformacionContacto":
@@ -140,20 +144,20 @@ async def handle_function_call(function_call) -> dict:
         return {"success": False, "error": str(e)}
 
 # ----------------------------
-# FastAPI app & CORS
+# FastAPI app y CORS
 # ----------------------------
 app = FastAPI()
-origins = ["https://blimark.tech", "https://api.blimark.tech"] # Asegúrate de incluir cualquier dominio de Botpress si es necesario (ej. el de tu Studio o el del Webchat)
+origins = ["https://blimark.tech", "https://api.blimark.tech"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins, # Considera usar ["*"] temporalmente para depurar problemas de CORS
+    allow_origins=origins,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=False, # Cambia a True si envías cookies o encabezados de autenticación complejos que lo requieran
+    allow_credentials=False,
 )
 
 # ----------------------------
-# Modelo de datos
+# Modelo de datos para /chat
 # ----------------------------
 class ChatRequest(BaseModel):
     history: list
@@ -165,23 +169,19 @@ class ChatRequest(BaseModel):
         return v[-200:] if len(v) > 200 else v
 
 # ----------------------------
-# Login endpoint (/token)
+# Endpoint de login (/token)
 # ----------------------------
 @app.post("/token")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    user = get_user(form_data.username)
-    if not user:
+async def login(username: str = Form(...), password: str = Form(...)):
+    user = get_user(username)
+    if not user or not Hasher.verify_password(password, user["hashed_password"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Usuario no encontrado")
-    if not Hasher.verify_password(form_data.password, user["hashed_password"]):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Contraseña incorrecta")
+                            detail="Usuario o contraseña incorrectos")
     token = create_access_token(data={"sub": user["username"]})
-    # Modificación para compatibilidad con Botpress HTTP Request card
     return {"response": {"access_token": token, "token_type": "bearer"}}
 
 # ----------------------------
-# Protected chat endpoint (/chat)
+# Endpoint protegido (/chat)
 # ----------------------------
 @app.post("/chat", dependencies=[Depends(verify_token)])
 async def chat(request: ChatRequest = Body(...)):
@@ -203,6 +203,7 @@ async def chat(request: ChatRequest = Body(...)):
                 for chunk in item.content:
                     initial_text += getattr(chunk, "text", "")
 
+        # Si hay llamada a función
         if detected_fc:
             args = json.loads(detected_fc.arguments)
             required = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
@@ -232,7 +233,7 @@ async def chat(request: ChatRequest = Body(...)):
 
             return JSONResponse(content={"response": {"type": "text", "text": final_text}})
 
-        # Sin llamada a función
+        # Si no hay función, devolvemos texto directo
         return JSONResponse(content={
             "response": {"type": "text", "text": initial_text or "No pude generar una respuesta."}
         })
