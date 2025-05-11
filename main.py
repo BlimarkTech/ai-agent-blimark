@@ -1,29 +1,41 @@
 # -*- coding: utf-8 -*-
-
 import os
 import logging
 import json
 import requests
 from datetime import datetime, timedelta
-
 from dotenv import load_dotenv
-
 from fastapi import FastAPI, Body, HTTPException, Depends, Form, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr, validator
-
+from pydantic import BaseModel, EmailStr, ValidationError, validator
 from openai import AsyncOpenAI, BadRequestError
 from supabase import create_client, Client
 from jose import JWTError, jwt
-
 from core.hashing import Hasher
 
 # ----------------------------
-# Carga de variables de entorno
+# Carga y validación de variables de entorno
 # ----------------------------
 load_dotenv()
+
+REQUIRED_VARS = [
+    "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "VECTOR_STORE_ID", "SECRET_KEY"
+]
+missing = [v for v in REQUIRED_VARS if not os.getenv(v)]
+if missing:
+    raise RuntimeError(f"Faltan variables de entorno obligatorias: {missing}")
+
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+VECTOR_STORE_ID = os.getenv("VECTOR_STORE_ID")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config")
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
 # ----------------------------
 # Logging
@@ -32,33 +44,13 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ----------------------------
-# Configuración desde env
-# ----------------------------
-OPENAI_API_KEY           = os.getenv("OPENAI_API_KEY")
-SUPABASE_URL            = os.getenv("SUPABASE_URL")
-SUPABASE_KEY            = os.getenv("SUPABASE_KEY")
-WEBHOOK_URL             = os.getenv("WEBHOOK_URL", "")
-VECTOR_STORE_ID         = os.getenv("VECTOR_STORE_ID")
-SUPABASE_BUCKET         = os.getenv("SUPABASE_BUCKET", "config")
-SECRET_KEY              = os.getenv("SECRET_KEY", "clave-secreta-segura")
-ALGORITHM               = os.getenv("ALGORITHM", "HS256")
-ACCESS_TOKEN_EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
-
-if not OPENAI_API_KEY:
-    logger.error("Falta OPENAI_API_KEY")
-if not SUPABASE_URL or not SUPABASE_KEY:
-    logger.error("Faltan SUPABASE_URL/SUPABASE_KEY")
-if not VECTOR_STORE_ID:
-    logger.error("Falta VECTOR_STORE_ID")
-
-# ----------------------------
-# Clientes de API
+# Clientes de servicio
 # ----------------------------
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ----------------------------
-# Configuración JWT y seguridad
+# Configuración de JWT
 # ----------------------------
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
 
@@ -84,9 +76,9 @@ def verify_token(token: str = Depends(oauth2_scheme)) -> dict:
 # ----------------------------
 def get_user(username: str) -> dict | None:
     resp = supabase.table("users") \
-                   .select("username, hashed_password") \
-                   .eq("username", username) \
-                   .single().execute()
+        .select("username, hashed_password") \
+        .eq("username", username) \
+        .single().execute()
     logger.info(f"Supabase get_user resp: {resp.data}")
     return resp.data
 
@@ -94,6 +86,9 @@ def get_user(username: str) -> dict | None:
 # Carga de archivos desde Supabase
 # ----------------------------
 def load_supabase_file(bucket: str, file_path: str, as_text: bool = True):
+    # Protección básica contra rutas peligrosas
+    if ".." in file_path or file_path.startswith("/"):
+        raise ValueError(f"Ruta de archivo no válida: {file_path}")
     resp = supabase.storage.from_(bucket).download(file_path)
     if hasattr(resp, "error") and resp.error:
         raise RuntimeError(f"Error descargando {file_path}: {resp.error}")
@@ -108,8 +103,8 @@ def load_tools() -> list:
     return json.loads(tools_json)
 
 SYSTEM_MESSAGE = load_system_message()
-custom_tools   = load_tools()
-tools          = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
+custom_tools = load_tools()
+tools = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}] + custom_tools
 
 # ----------------------------
 # Obtención de enlace de agenda
@@ -117,9 +112,9 @@ tools          = [{"type": "file_search", "vector_store_ids": [VECTOR_STORE_ID]}
 def get_enlace_agenda() -> str | None:
     try:
         resp = supabase.table("datos_criticos") \
-                       .select("valor") \
-                       .eq("clave", "enlace_agenda") \
-                       .execute()
+            .select("valor") \
+            .eq("clave", "enlace_agenda") \
+            .execute()
         if resp.data:
             return resp.data[0]["valor"]
     except Exception as e:
@@ -134,8 +129,12 @@ async def handle_function_call(function_call) -> dict:
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
+        # Validación correcta de email con Pydantic
         if "email" in args:
-            EmailStr.validate(args["email"])
+            try:
+                EmailStr(args["email"])
+            except ValidationError as e:
+                return {"success": False, "error": f"Email inválido: {e}"}
         resp = requests.post(WEBHOOK_URL, json=args, timeout=5)
         resp.raise_for_status()
         return {"success": True, "status_code": resp.status_code}
@@ -147,7 +146,8 @@ async def handle_function_call(function_call) -> dict:
 # FastAPI app y CORS
 # ----------------------------
 app = FastAPI()
-origins = ["https://blimark.tech", "https://api.blimark.tech"]
+
+origins = ["https://blimark.tech"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -183,7 +183,8 @@ async def login(request: Request):
         form = await request.form()
         username = form.get("username")
         password = form.get("password")
-
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Faltan credenciales")
     user = get_user(username)
     if not user or not Hasher.verify_password(password, user["hashed_password"]):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
@@ -199,7 +200,6 @@ async def chat(request: ChatRequest = Body(...)):
     history = request.history or []
     logger.info(f"Historial recibido: {len(history)} ítems")
     messages = [{"role": "system", "content": SYSTEM_MESSAGE}] + history
-
     try:
         # Primera llamada a GPT
         response1 = await openai_client.responses.create(
@@ -213,7 +213,6 @@ async def chat(request: ChatRequest = Body(...)):
             if getattr(item, "content", None):
                 for chunk in item.content:
                     initial_text += getattr(chunk, "text", "")
-
         if detected_fc:
             args = json.loads(detected_fc.arguments)
             required = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
@@ -221,7 +220,6 @@ async def chat(request: ChatRequest = Body(...)):
             if missing:
                 texto = f"Para agendar necesito: {', '.join(missing)}. ¿Podrías proporcionarlos?"
                 return JSONResponse(content={"response": {"type": "text", "text": texto}})
-
             fc_result = await handle_function_call(detected_fc)
             messages += [
                 {"type": "function_call", "call_id": detected_fc.call_id,
@@ -229,6 +227,7 @@ async def chat(request: ChatRequest = Body(...)):
                 {"type": "function_call_output", "call_id": detected_fc.call_id,
                  "output": json.dumps(fc_result)}
             ]
+            # Segunda llamada con el resultado de la función
             response2 = await openai_client.responses.create(
                 model="gpt-4.1", input=messages, tools=tools
             )
@@ -237,17 +236,12 @@ async def chat(request: ChatRequest = Body(...)):
                 for itm in response2.output if getattr(itm, "content", None)
                 for chunk in itm.content
             )
-            enlace = get_enlace_agenda()
-            if enlace and enlace not in final_text:
-                final_text += f"\n\nEnlace para agendar tu cita: {enlace}"
-
-            return JSONResponse(content={"response": {"type": "text", "text": final_text}})
-
-        # Si no hay llamada a función
-        return JSONResponse(content={
-            "response": {"type": "text", "text": initial_text or "No pude generar una respuesta."}
-        })
-
+        else:
+            final_text = initial_text or "No pude generar una respuesta."
+        enlace = get_enlace_agenda()
+        if enlace and enlace not in final_text:
+            final_text += f"\n\nEnlace para agendar tu cita: {enlace}"
+        return JSONResponse(content={"response": {"type": "text", "text": final_text}})
     except BadRequestError as e:
         logger.error(f"BadRequestError: {e}", exc_info=True)
         return JSONResponse(status_code=400, content={"error": str(e)})
