@@ -5,7 +5,7 @@ import json
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from fastapi import FastAPI, Body, HTTPException, Depends, Form, status, Request
+from fastapi import FastAPI, Body, HTTPException, Depends, status, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -19,7 +19,6 @@ from core.hashing import Hasher
 # Carga y validación de variables de entorno
 # ----------------------------
 load_dotenv()
-
 REQUIRED_VARS = [
     "OPENAI_API_KEY", "SUPABASE_URL", "SUPABASE_KEY", "VECTOR_STORE_ID", "SECRET_KEY"
 ]
@@ -122,6 +121,12 @@ def get_enlace_agenda() -> str | None:
     return None
 
 # ----------------------------
+# Modelo temporal para validar email (Pydantic v2)
+# ----------------------------
+class EmailCheckModel(BaseModel):
+    email: EmailStr
+
+# ----------------------------
 # Manejo de llamadas a funciones externas
 # ----------------------------
 async def handle_function_call(function_call) -> dict:
@@ -129,10 +134,10 @@ async def handle_function_call(function_call) -> dict:
         return {"success": False, "error": f"Función desconocida: {function_call.name}"}
     try:
         args = json.loads(function_call.arguments)
-        # Validación correcta de email con Pydantic
+        # Validación correcta de email con modelo temporal (Pydantic v2)
         if "email" in args:
             try:
-                EmailStr(args["email"])
+                EmailCheckModel(email=args["email"])
             except ValidationError as e:
                 return {"success": False, "error": f"Email inválido: {e}"}
         resp = requests.post(WEBHOOK_URL, json=args, timeout=5)
