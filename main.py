@@ -63,7 +63,7 @@ cipher = Fernet(ENCRYPTION_MASTER_KEY)
 # ----------------------------
 # FastAPI app y CORS
 # ----------------------------
-app = FastAPI(title="Agente IA Multi-Tenant (Responses API)", version="1.1.4")
+app = FastAPI(title="Agente IA Multi-Tenant (Responses API)", version="1.2.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], # Ajustar en producción
@@ -136,7 +136,7 @@ def get_data_critico(tenant_id: str, clave: str, tenant_identifier: str) -> str 
                 return valor
         logger.info(f"Dato crítico '{clave}' no encontrado o valor vacío para {tenant_identifier}.")
         return None
-    except Exception as e: 
+    except Exception as e:
         logger.error(f"Excepción al obtener dato crítico '{clave}' para {tenant_identifier}: {e}", exc_info=True)
         return None
 
@@ -144,35 +144,61 @@ class EmailCheckModel(BaseModel): email: EmailStr
 
 async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str) -> dict:
     name = call_obj.name
-    if name != "recolectarInformacionContacto": return {"success": False, "error": f"Función no soportada: {name}"}
-    if not supabase: return {"success": False, "error": "Servicio de configuración no disponible."}
     
+    # ✅ BACKEND NEUTRAL: Acepta CUALQUIER función definida en el JSON del tenant
+    logger.info(f"Ejecutando función '{name}' para tenant {tenant_identifier}")
+    
+    if not supabase: 
+        return {"success": False, "error": "Servicio de configuración no disponible."}
+    
+    # Obtener webhook del tenant
     resp_webhook = supabase.table("tenants").select("recoleccion_webhook_url").eq("id", tenant_id).single().execute()
-    if not resp_webhook.data: return {"success": False, "error": f"Configuración webhook no encontrada para {tenant_identifier}."}
+    if not resp_webhook.data: 
+        return {"success": False, "error": f"Configuración webhook no encontrada para {tenant_identifier}."}
+    
     url = resp_webhook.data.get("recoleccion_webhook_url")
-    if not url or not url.strip(): return {"success": False, "error": f"Función '{name}' no configurada (falta URL webhook)."}
+    if not url or not url.strip(): 
+        return {"success": False, "error": f"Función '{name}' no configurada (falta URL webhook)."}
 
     try:
         args = json.loads(call_obj.arguments)
-        if "email" in args and args["email"]:
-            try: EmailCheckModel(email=args["email"])
-            except ValidationError as ve: return {"success": False, "error": f"Email inválido: {ve.errors()}"}
         
-        payload = {**args, "_tenant_info": {"id": tenant_id, "identifier": tenant_identifier}}
-        logger.info(f"Enviando a webhook {url} para {tenant_identifier}")
+        # ✅ VALIDACIÓN GENÉRICA: Solo valida email si existe en los argumentos
+        if "email" in args and args["email"]: 
+            try: 
+                EmailCheckModel(email=args["email"])
+            except ValidationError as ve: 
+                logger.warning(f"Validación de email fallida para '{args['email']}' en tenant {tenant_identifier}: {ve.errors()}")
+                return {"success": False, "error": f"Email inválido: {ve.errors()}"}
+        
+        # ✅ PAYLOAD GENÉRICO: Envía todos los argumentos + info del tenant
+        payload = {**args, "_tenant_info": {"id": tenant_id, "identifier": tenant_identifier, "function_name": name}}
+        logger.info(f"Enviando función '{name}' a webhook para {tenant_identifier}")
+        
         r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
-        return {"success": True, "status_code": r.status_code, "response_data": r.json() if r.content and 'application/json' in r.headers.get('Content-Type','') else {"raw_response": r.text[:200]}}
+        logger.info(f"Webhook para {tenant_identifier} respondió con status {r.status_code}")
+        
+        return {
+            "success": True, 
+            "status_code": r.status_code, 
+            "function_name": name,
+            "response_data": r.json() if r.content and 'application/json' in r.headers.get('Content-Type','').lower() else {"raw_response": r.text[:200]}
+        }
+        
     except requests.exceptions.HTTPError as http_err:
+        logger.error(f"Error HTTP en webhook para {tenant_identifier} (Status: {getattr(http_err.response, 'status_code', 'N/A')})")
         return {"success": False, "error": f"Error webhook ({getattr(http_err.response, 'status_code', 'N/A')})."}
-    except Exception as e: return {"success": False, "error": str(e)}
+    except Exception as e: 
+        logger.error(f"Error general en función '{name}' para {tenant_identifier}: {e}", exc_info=True)
+        return {"success": False, "error": str(e)}
 
 class ChatMessage(BaseModel): role: str; content: str
 class ChatRequest(BaseModel):
     history: list[ChatMessage]; conversation_id: str | None = None; user_id_external: str | None = None
     @field_validator("history")
     @classmethod
-    def validate_history(cls, v): 
+    def validate_history(cls, v):
         if not isinstance(v, list): raise ValueError("history debe ser una lista")
         return v[-200:] if len(v) > 200 else v
 class ChatResponseData(BaseModel): type: str = "text"; text: str | None
@@ -220,31 +246,33 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         detected_fc, initial_text = None, ""
         for item in response1.output:
             if getattr(item, "type", "") == "function_call":
-                detected_fc = item; logger.info(f"Función detectada: {detected_fc.name} para {ident}"); break 
-            if hasattr(item, "content") and item.content: 
-                for chunk in item.content: 
+                detected_fc = item; logger.info(f"Función detectada: {detected_fc.name} para {ident}"); break
+            if hasattr(item, "content") and item.content:
+                for chunk in item.content:
                     if hasattr(chunk, "text"): initial_text += chunk.text
         final_text_to_return = initial_text
 
         if detected_fc:
             logger.info(f"Procesando función '{detected_fc.name}' para {ident}")
             args = json.loads(detected_fc.arguments)
-            fc_result = None 
+            fc_result = None
             
-            if detected_fc.name == "recolectarInformacionContacto":
+            # ✅ LÓGICA GENÉRICA: Solo validación especial para recolectarInformacionContacto de Blimark Tech
+            if detected_fc.name == "recolectarInformacionContacto" and ident == "blimark_tech":
                 required_fields = ["nombre", "apellidos", "email", "telefono", "pais", "mensaje"]
                 missing_fields = [f for f in required_fields if not args.get(f,"").strip()]
                 if missing_fields:
                     final_text_to_return = f"Para procesar tu solicitud de contacto, necesito: {', '.join(missing_fields)}. ¿Podrías proporcionarlos?"
                     logger.info(f"Respondiendo con solicitud de campos faltantes para {ident}.")
-                else: 
+                else:
                     fc_result = await handle_function_call(detected_fc, tid, ident)
-                    logger.info(f"Resultado de recolectarInformacionContacto para {ident}: {fc_result}")
-            else: 
+                    logger.info(f"Resultado de {detected_fc.name} para {ident}: {fc_result}")
+            else:
+                # ✅ PARA TODAS LAS DEMÁS FUNCIONES: Ejecución directa sin validación de campos
                 fc_result = await handle_function_call(detected_fc, tid, ident)
                 logger.info(f"Resultado de {detected_fc.name} para {ident}: {fc_result}")
             
-            if fc_result is not None: 
+            if fc_result is not None:
                 messages_for_api.append({"type": "function_call", "call_id": detected_fc.call_id, "name": detected_fc.name, "arguments": detected_fc.arguments})
                 messages_for_api.append({"type": "function_call_output", "call_id": detected_fc.call_id, "output": json.dumps(fc_result)})
                 logger.info(f"Realizando segunda llamada a Responses API para {ident} con resultado de función.")
@@ -254,34 +282,35 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                     if hasattr(item2, "content") and item2.content:
                         for chunk2 in item2.content:
                             if hasattr(chunk2, "text"): text_from_second_call += chunk2.text
-                final_text_to_return = text_from_second_call or "Información procesada." 
+                final_text_to_return = text_from_second_call or "Información procesada."
                 logger.info(f"Texto de segunda llamada para {ident}: '{final_text_to_return}'")
 
+                # ✅ LÓGICA GENÉRICA: Busca texto post-función para CUALQUIER función exitosa
                 if fc_result.get("success", False):
-                    clave_texto_post_funcion = f"post_text_{detected_fc.name}" 
+                    clave_texto_post_funcion = f"post_text_{detected_fc.name}"
                     texto_personalizado = get_data_critico(tid, clave_texto_post_funcion, ident)
                     if texto_personalizado and texto_personalizado not in final_text_to_return:
                         final_text_to_return += f"\n\n{texto_personalizado}"
                         logger.info(f"Texto personalizado para '{clave_texto_post_funcion}' añadido para {ident}.")
                     else:
                         logger.info(f"Función '{detected_fc.name}' exitosa, pero no se encontró texto personalizado con clave '{clave_texto_post_funcion}' para {ident}.")
-        else: 
-            final_text_to_return = initial_text or "No pude generar una respuesta en este momento." 
+        else:
+            final_text_to_return = initial_text or "No pude generar una respuesta en este momento."
             logger.info(f"Texto de primera llamada (sin función) para {ident}: '{final_text_to_return}'")
 
         conv_id = data.conversation_id or f"conv_{datetime.now(timezone.utc).isoformat()}"
         user_ext_id = data.user_id_external or "unknown_user"
-        if data.history: 
+        if data.history:
             last_user_msg = data.history[-1]
             supabase.table("chat_history").insert({"tenant_id": tid, "conversation_id": conv_id, "user_id_external": user_ext_id, "role": last_user_msg.role, "content": last_user_msg.content}).execute()
-        if final_text_to_return: 
+        if final_text_to_return:
             supabase.table("chat_history").insert({"tenant_id": tid, "conversation_id": conv_id, "user_id_external": user_ext_id, "role": "assistant", "content": final_text_to_return}).execute()
         return ChatApiResponse(response=ChatResponseData(text=final_text_to_return))
 
     except BadRequestError as e:
         error_detail = str(e); logger.error(f"BadRequestError en /chat para {ident}: {error_detail}", exc_info=True)
         if hasattr(e, 'body') and e.body and isinstance(e.body, dict) and "message" in e.body: error_detail = e.body["message"]
-        elif hasattr(e, 'message'): error_detail = e.message 
+        elif hasattr(e, 'message'): error_detail = e.message
         raise HTTPException(status_code=400, detail=f"Error de OpenAI: {error_detail}")
     except RuntimeError as e:
         logger.error(f"RuntimeError en /chat para {ident}: {str(e)}", exc_info=True)
@@ -297,4 +326,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
