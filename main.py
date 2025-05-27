@@ -55,10 +55,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 # ----------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-# Cambiando el nombre del logger para que coincida con el archivo adjunto, si es necesario.
-# Mantendré el que usé en la v1.3.2.
-logger = logging.getLogger("multi_tenant_agent_pinecone_responses_api")
-
+logger = logging.getLogger("multi_tenant_agent_pinecone_responses_api") # Nombre del logger consistente
 
 # ----------------------------
 # Clientes de servicio
@@ -85,19 +82,19 @@ cipher = Fernet(ENCRYPTION_MASTER_KEY)
 # FastAPI app y CORS
 # ----------------------------
 
-app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.3")
+app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.4") # Nueva versión
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
-)
-
+) 
+# La indentación del decorador @app.exception_handler estaba corregida en tu archivo, la mantengo.
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body(); logger.error(f"RequestValidationError: {exc.errors()} – Body: {body.decode('utf-8')}")
     return await request_validation_exception_handler(request, exc)
 
-# --- Modelos Pydantic y JWT ---
+# --- Modelos Pydantic y JWT (Idénticos a tu archivo) ---
 class TokenData(BaseModel): tenant_id: str; identifier: str
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
@@ -117,7 +114,7 @@ async def get_current_tenant(token: str = Depends(oauth2_scheme)) -> TokenData:
         return TokenData(tenant_id=tid, identifier=ident)
     except JWTError: raise creds_exc
 
-# --- Helpers ---
+# --- Helpers (Idénticos a tu archivo, con el logging que ya tenías) ---
 def load_supabase_file(bucket: str, path: str, as_text: bool = True) -> str | bytes:
     if not supabase: raise RuntimeError("Supabase no disponible.")
     if ".." in path or path.startswith("/"): raise ValueError(f"Ruta inválida: {path}")
@@ -182,20 +179,19 @@ async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str)
             try: EmailCheckModel(email=args_dict["email"])
             except ValidationError as ve:
                 logger.warning(f"Validación de email fallida en handle_function_call para '{args_dict['email']}' en {tenant_identifier}: {ve.errors()}")
-                return {"success": False, "error": f"El email proporcionado no es válido: {args_dict['email']}"} # Mensaje más claro
+                return {"success": False, "error": f"El email proporcionado no es válido: {args_dict['email']}"} 
         
         payload = {**args_dict, "_tenant_info": {"id": tenant_id, "identifier": tenant_identifier, "function_name": name}}
         logger.info(f"Enviando datos de función '{name}' a webhook '{url}' para {tenant_identifier}. Payload: {payload}")
-        r = requests.post(url, json=payload, timeout=15) # Aumentado timeout a 15s
-        r.raise_for_status() # Esto lanzará una excepción para errores HTTP 4xx/5xx
+        r = requests.post(url, json=payload, timeout=15) 
+        r.raise_for_status() 
         logger.info(f"Webhook para {tenant_identifier} (función '{name}') respondió con status {r.status_code}.")
         
-        # Devolver siempre un JSON si es posible, o un texto si no
         try:
             response_data_webhook = r.json()
         except json.JSONDecodeError:
             logger.warning(f"Respuesta del webhook para {name} de {tenant_identifier} no es JSON. Raw: {r.text[:200]}")
-            response_data_webhook = {"raw_response": r.text[:500]} # Limitar tamaño de raw_response
+            response_data_webhook = {"raw_response": r.text[:500]} 
 
         return {"success": True, "status_code": r.status_code, "function_name": name, "response_data": response_data_webhook}
 
@@ -210,22 +206,19 @@ async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str)
         logger.error(f"Error general en handle_function_call para '{name}' de {tenant_identifier}: {e}", exc_info=True)
         return {"success": False, "error": f"Error interno procesando la función: {str(e)}"}
 
-# --- Modelos Pydantic para Chat ---
+# --- Modelos Pydantic para Chat (Idénticos a tu archivo) ---
 class ChatMessage(BaseModel): role: str; content: str
-
 class ChatRequest(BaseModel):
     history: list[ChatMessage]; conversation_id: str | None = None; user_id_external: str | None = None
-    
     @field_validator("history")
     @classmethod
     def validate_history(cls, v):
         if not isinstance(v, list): raise ValueError("history debe ser una lista")
-        return v[-200:] if len(v) > 200 else v # Limitar historial para evitar prompts muy largos
-
+        return v[-200:] if len(v) > 200 else v 
 class ChatResponseData(BaseModel): type: str = "text"; text: str | None
 class ChatApiResponse(BaseModel): response: ChatResponseData
 
-# --- Endpoint de Token ---
+# --- Endpoint de Token (Idéntico a tu archivo) ---
 @app.post("/token", summary="Obtener JWT para tenant")
 async def token_endpoint(api_key_botpress: str = Form(...)):
     if not supabase: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio de base de datos no disponible.")
@@ -235,13 +228,11 @@ async def token_endpoint(api_key_botpress: str = Form(...)):
         if not resp.data: 
             logger.warning("No se encontraron tenants activos en la base de datos al solicitar token.")
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Configuración de tenants inválida o no hay tenants activos.")
-        
         for row in resp.data:
             if pwd_context.verify(api_key_botpress, row["api_key_hash"]):
                 token = create_access_token({"tenant_id": str(row["id"]), "identifier": row["identifier"]})
                 logger.info(f"Token generado exitosamente para tenant: {row['identifier']}")
                 return {"response": {"access_token": token, "token_type": "bearer"}}
-        
         logger.warning(f"API Key de Botpress no válida o tenant inactivo. API Key (primeros 10): {api_key_botpress[:10]}")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API Key inválida o inquilino inactivo")
     except Exception as e:
@@ -261,7 +252,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
     try:
         # 1. Cargar configuración del tenant y API Key de OpenAI del tenant
         tenant_openai_key = get_tenant_openai_key(tid, ident)
-        openai_client_for_tenant = AsyncOpenAI(api_key=tenant_openai_key) # Cliente específico para este tenant
+        openai_client_for_tenant = AsyncOpenAI(api_key=tenant_openai_key) 
         
         logger.info(f"Cargando archivos de configuración para tenant '{ident}' desde bucket '{SUPABASE_BUCKET}'...")
         system_md = load_supabase_file(SUPABASE_BUCKET, f"{ident}/system_message_{ident}.md")
@@ -277,22 +268,28 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         
         pinecone_index_name = vs_conf_resp.data.get("pinecone_index_name")
         pinecone_namespace = vs_conf_resp.data.get("pinecone_namespace")
-        vector_provider = vs_conf_resp.data.get("vector_store_provider", "pinecone") # Default a pinecone si no está
+        vector_provider = vs_conf_resp.data.get("vector_store_provider", "pinecone") 
         
         logger.info(f"🌲 Configuración Pinecone para '{ident}': Index='{pinecone_index_name}', Namespace='{pinecone_namespace}', Provider='{vector_provider}'")
         
-        rag_context_str = "" # Inicializar string de contexto RAG
+        rag_context_str = "" 
         
-        # Proceder con RAG si está configurado y hay historial de chat para obtener la última pregunta
+        # --- UMBRAL DE SIMILITUD PARA RAG ---
+        # Ajustar este valor según las pruebas con los logs y la calidad de las respuestas.
+        # Para chunks grandes (ej. 2000 caracteres), un umbral más alto puede ser apropiado.
+        # Empezar con 0.65 e iterar.
+        SIMILARITY_THRESHOLD = 0.65 
+        logger.info(f"🔬 Usando umbral de similitud para RAG: {SIMILARITY_THRESHOLD}")
+        # --- FIN DEL AJUSTE ---
+
         if vector_provider == "pinecone" and pinecone_index_name and pinecone_namespace and data.history:
             user_query = data.history[-1].content if data.history and data.history[-1].role == "user" else ""
             if user_query:
                 try:
                     logger.info(f"🔍 INICIANDO RAG para '{ident}'. Consulta del Usuario: '{user_query[:150]}...'")
                     
-                    # Generar embedding para la consulta del usuario
                     query_embedding_response = await openai_client_for_tenant.embeddings.create(
-                        input=[user_query], model="text-embedding-3-small" # Modelo de embedding recomendado
+                        input=[user_query], model="text-embedding-3-small" 
                     )
                     query_vector = query_embedding_response.data[0].embedding
                     logger.info(f"✅ Embedding generado para la consulta de '{ident}'. Dimensión: {len(query_vector)}")
@@ -300,11 +297,10 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                     pinecone_index_client = pc.Index(pinecone_index_name)
                     logger.info(f"🔗 Consultando Pinecone: Index='{pinecone_index_name}', Namespace='{pinecone_namespace}', TopK=5")
                     
-                    # Consultar Pinecone
                     query_results = pinecone_index_client.query(
                         namespace=pinecone_namespace, 
                         vector=query_vector,
-                        top_k=5,  # Obtener hasta 5 chunks relevantes
+                        top_k=5, 
                         include_metadata=True 
                     )
                     
@@ -314,21 +310,20 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                     relevant_texts = []
                     if match_count > 0:
                         for i, match in enumerate(query_results.matches):
-                            # Acceso seguro a metadatos
                             metadata = match.metadata if hasattr(match, 'metadata') else {}
                             doc_name = metadata.get('document_name', 'N/A') if metadata else 'N/A'
                             text_preview = (metadata.get('text', '')[:100] + '...') if metadata and metadata.get('text') else 'N/A'
                             logger.info(f"📄 Resultado RAG {i+1} para '{ident}': ID={match.id}, Score={match.score:.4f}, Doc='{doc_name}', Texto='{text_preview}'")
                             
-                            if match.score > 0.5: # Umbral de similitud (ajustar según sea necesario)
+                            if match.score > SIMILARITY_THRESHOLD: 
                                 text_content = metadata.get('text', '') if metadata else ''
                                 if text_content:
                                     relevant_texts.append(text_content)
-                                    logger.info(f"👍 Chunk INCLUIDO para '{ident}' (Score: {match.score:.4f}, Doc: '{doc_name}')")
+                                    logger.info(f"👍 Chunk INCLUIDO para '{ident}' (Score: {match.score:.4f} > {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')")
                                 else:
-                                    logger.warning(f"🤔 Chunk con Score > 0.5 para '{ident}' pero sin contenido de texto en metadatos. ID={match.id}")
+                                    logger.warning(f"🤔 Chunk con Score > {SIMILARITY_THRESHOLD} para '{ident}' pero sin contenido de texto en metadatos. ID={match.id}")
                             else:
-                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= 0.5, Doc: '{doc_name}')")
+                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')")
                     
                     if relevant_texts:
                         rag_context_str = "\n\n" + "="*60 + "\n"
@@ -341,11 +336,10 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                         rag_context_str += "="*60
                         logger.info(f"🎯 Contexto RAG construido para '{ident}'. {len(relevant_texts)} chunks incluidos. Longitud total del contexto: {len(rag_context_str)} caracteres.")
                     else: 
-                        logger.warning(f"⚠️ No se encontró contexto RAG suficientemente relevante en Pinecone para '{ident}' (todos los scores <= 0.5 o chunks sin texto). No se añadirá contexto RAG.")
+                        logger.warning(f"⚠️ No se encontró contexto RAG suficientemente relevante en Pinecone para '{ident}' (todos los scores <= {SIMILARITY_THRESHOLD} o chunks sin texto). No se añadirá contexto RAG.")
                 
                 except PineconeException as pe: 
                     logger.error(f"❌ Error de API de Pinecone durante RAG para '{ident}': {pe}", exc_info=True)
-                    # Considerar si se debe continuar sin RAG o devolver error. Por ahora, continúa.
                 except OpenAIError as oe: 
                     logger.error(f"❌ Error de API de OpenAI (Embeddings) durante RAG para '{ident}': {oe}", exc_info=True)
                 except Exception as e_rag: 
@@ -356,10 +350,8 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
             if not data.history:
                  logger.info(f"ℹ️ No hay historial de chat para '{ident}', no se realizará RAG.")
             logger.info(f"↪️ Saltando RAG para '{ident}'.")
-
         
-        # 3. Preparar 'input' para Responses API
-        effective_system_message = system_md + rag_context_str # Inyectar contexto RAG (será vacío si no hubo RAG)
+        effective_system_message = system_md + rag_context_str 
         
         logger.info(f"📝 System message final para '{ident}' - Longitud total: {len(effective_system_message)} chars. ¿Contexto RAG añadido?: {'SÍ' if rag_context_str else 'NO'}")
         logger.debug(f"SYSTEM_MESSAGE_FINAL (primeros 500 chars para '{ident}'):\n{effective_system_message[:500]}")
@@ -370,33 +362,30 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         for msg in data.history: 
             input_messages_for_api.append({"role": msg.role, "content": msg.content})
         
-        # 4. Llamada inicial a Responses API
         effective_tools_for_api = custom_tools if custom_tools else []
         
         logger.info(f"🤖 Llamando a OpenAI Responses API para '{ident}'. Modelo: gpt-4.1 (o similar). Tools: {len(effective_tools_for_api)}. RAG usado: {'SÍ' if rag_context_str else 'NO'}")
         
         response1 = await openai_client_for_tenant.responses.create(
-            model="gpt-4.1", # Asegúrate que este es el modelo que soporta Responses API y que tienes acceso
+            model="gpt-4.1", 
             input=input_messages_for_api,
             tools=effective_tools_for_api
         )
         
-        # 5. Procesar la salida de Responses API
         detected_fc_item, initial_text = None, ""
         
-        if response1.output: # Asegurarse de que output no es None
+        if response1.output: 
             for item in response1.output:
-                if getattr(item, "type", "") == "function_call": # item es FunctionCallContentPart
+                if getattr(item, "type", "") == "function_call": 
                     detected_fc_item = item
                     logger.info(f"🔧 Función detectada por LLM: '{detected_fc_item.name}' para '{ident}'. Argumentos (raw): {detected_fc_item.arguments}")
-                    break # Asumimos una sola llamada a función por turno por ahora
-                if hasattr(item, "content") and item.content: # item.content es lista de TextContentPart
+                    break 
+                if hasattr(item, "content") and item.content: 
                     for text_content_part in item.content:
                         if hasattr(text_content_part, "text") and text_content_part.text:
                             initial_text += text_content_part.text
         else:
             logger.warning(f"Respuesta de OpenAI (response1.output) vacía o None para '{ident}'.")
-
 
         final_text_to_return = initial_text.strip()
         
@@ -406,22 +395,21 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
             
             fc_result_payload = await handle_function_call(detected_fc_item, tid, ident)
             
-            # El LLM necesita el resultado de la función para generar la respuesta final.
-            current_input_for_api_after_fc = list(input_messages_for_api) # Empezar desde el input original de la primera llamada
-            current_input_for_api_after_fc.append({ # Añadir la llamada a función que hizo el modelo
+            current_input_for_api_after_fc = list(input_messages_for_api) 
+            current_input_for_api_after_fc.append({ 
                 "type": "function_call", "call_id": detected_fc_item.call_id,
                 "name": function_name_called, "arguments": detected_fc_item.arguments
             })
-            current_input_for_api_after_fc.append({ # Añadir el resultado de nuestra ejecución de la función (del webhook)
+            current_input_for_api_after_fc.append({ 
                 "type": "function_call_output", "call_id": detected_fc_item.call_id,
                 "output": json.dumps(fc_result_payload) 
             })
             
             logger.info(f"📞 Realizando SEGUNDA llamada a Responses API para '{ident}' con resultado de función '{function_name_called}'.")
             response2 = await openai_client_for_tenant.responses.create(
-                model="gpt-4.1", # Usar el mismo modelo
+                model="gpt-4.1", 
                 input=current_input_for_api_after_fc,
-                tools=effective_tools_for_api # Las herramientas deben estar disponibles también en la segunda llamada
+                tools=effective_tools_for_api 
             )
             
             text_from_second_call = ""
@@ -433,12 +421,10 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                                 text_from_second_call += text_part2.text
             else:
                 logger.warning(f"Respuesta de OpenAI (response2.output) vacía o None para '{ident}' después de función.")
-
             
             final_text_to_return = text_from_second_call.strip() or "Información procesada."
             logger.info(f"💬 Texto de SEGUNDA llamada para '{ident}' (después de función): '{final_text_to_return[:150]}...'")
             
-            # Añadir texto personalizado de datos_criticos si la función fue exitosa
             if fc_result_payload and fc_result_payload.get("success", False):
                 clave_texto_post_funcion = f"post_text_{function_name_called}"
                 texto_personalizado = get_data_critico(tid, clave_texto_post_funcion, ident)
@@ -452,26 +438,25 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                     logger.info(f"ℹ️ Función '{function_name_called}' exitosa, pero no se encontró texto personalizado con clave '{clave_texto_post_funcion}' para '{ident}'.")
             else:
                 logger.warning(f"⚠️ Función '{function_name_called}' no fue exitosa o fc_result_payload es None. No se buscará texto post-función. Payload: {fc_result_payload}")
-
+        
         else: # No se detectó función en la primera llamada
             if not final_text_to_return:
                 logger.warning(f"⚠️ Respuesta inicial de OpenAI vacía para '{ident}'. Devolviendo mensaje genérico.")
                 final_text_to_return = "No he podido generar una respuesta en este momento. ¿Podrías reformular tu pregunta o intentarlo de nuevo?"
             logger.info(f"💬 Respuesta directa (sin función) para '{ident}': '{final_text_to_return[:150]}...' RAG usado: {'SÍ' if rag_context_str else 'NO'}")
         
-        # 6. Guardar historial y retornar
-        conv_id = data.conversation_id or f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{ident}" # Más único
+        conv_id = data.conversation_id or f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{ident}" 
         user_ext_id = data.user_id_external or "unknown_user"
         
         try:
-            if data.history: # Guardar último mensaje del usuario
+            if data.history: 
                 last_user_msg = data.history[-1]
                 supabase.table("chat_history").insert({
                     "tenant_id": tid, "conversation_id": conv_id, "user_id_external": user_ext_id,
                     "role": last_user_msg.role, "content": last_user_msg.content
                 }).execute()
             
-            if final_text_to_return: # Guardar respuesta del asistente
+            if final_text_to_return: 
                 supabase.table("chat_history").insert({
                     "tenant_id": tid, "conversation_id": conv_id, "user_id_external": user_ext_id,
                     "role": "assistant", "content": final_text_to_return
@@ -479,30 +464,28 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
             logger.info(f"📚 Historial de chat guardado para conv_id: {conv_id}")
         except Exception as e_hist:
             logger.error(f"Error guardando historial de chat para conv_id {conv_id}: {e_hist}", exc_info=True)
-
         
         return ChatApiResponse(response=ChatResponseData(text=final_text_to_return))
     
-    # Bloques de excepción más específicos primero
     except OpenAIError as oe:
         logger.error(f"Error CRÍTICO de API de OpenAI en /chat para '{ident}': {oe}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error crítico comunicándose con OpenAI: {str(oe)}")
     except PineconeException as pe:
         logger.error(f"Error CRÍTICO de API de Pinecone en /chat para '{ident}': {pe}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Error crítico comunicándose con Pinecone: {str(pe)}")
-    except RuntimeError as e_rt: # Errores de configuración que definimos nosotros
+    except RuntimeError as e_rt: 
         logger.error(f"Error de configuración (RuntimeError) en /chat para '{ident}': {str(e_rt)}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Error de configuración del servidor: {str(e_rt)}")
     except Exception as e_gen:
         logger.error(f"Error INESPERADO y CRÍTICO en /chat para '{ident}': {str(e_gen)}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno inesperado procesando su solicitud.")
 
-# --- Health Check y Uvicorn run ---
+# --- Health Check y Uvicorn run (Idéntico a tu archivo) ---
 @app.get("/health", summary="Health check")
 async def health_check(): return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000)) # Puerto para Render
+    port = int(os.environ.get("PORT", 8000)) 
     logger.info(f"Iniciando Uvicorn en host 0.0.0.0 puerto {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True if os.environ.get("DEV_MODE") == "true" else False)
