@@ -278,7 +278,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         # Ajustar este valor según las pruebas con los logs y la calidad de las respuestas.
         # Para chunks grandes (ej. 2000 caracteres), un umbral más alto puede ser apropiado.
         # Empezar con 0.65 e iterar.
-        SIMILARITY_THRESHOLD = 0.65 
+        SIMILARITY_THRESHOLD = 0.30 
         logger.info(f"🔬 Usando umbral de similitud para RAG: {SIMILARITY_THRESHOLD}")
         # --- FIN DEL AJUSTE ---
 
