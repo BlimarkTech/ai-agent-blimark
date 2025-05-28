@@ -20,14 +20,15 @@ from supabase import create_client, Client
 
 # JWT y Criptografía
 from jose import JWTError, jwt
-from passlib.context import CryptContext # Asegúrate de bcrypt==4.0.1 en requirements.txt
+from passlib.context import CryptContext 
 from cryptography.fernet import Fernet
 
 # --- IMPORTACIÓN PARA PINECONE ---
 from pinecone import Pinecone, PineconeException
 
-# --- NUEVA IMPORTACIÓN PARA DETECCIÓN DE IDIOMA ---
-from langdetect import detect as detect_language, LangDetectException
+# --- IMPORTACIÓN PARA DETECCIÓN DE IDIOMA ---
+from langdetect import detect as detect_language, LangDetectException, DetectorFactory
+DetectorFactory.seed = 0 # Para resultados más consistentes con langdetect [3]
 
 # ----------------------------
 # Carga y validación de variables de entorno
@@ -57,8 +58,13 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 # Logging
 # ----------------------------
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s") # [7]
 logger = logging.getLogger("multi_tenant_agent_pinecone_responses_api") 
+
+# ----------------------------
+# Lista de idiomas soportados (para validación de langdetect)
+# ----------------------------
+SUPPORTED_LANG_CODES = {"es", "it", "pt", "en", "fr", "de"} # Basado en tu lista de idiomas
 
 # ----------------------------
 # Clientes de servicio
@@ -85,15 +91,17 @@ cipher = Fernet(ENCRYPTION_MASTER_KEY)
 # FastAPI app y CORS
 # ----------------------------
 
-app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.6") # Nueva versión
+app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.9") # Nueva versión
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
 )
+# La indentación del exception_handler está corregida según el archivo que adjuntaste
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    body = await request.body(); logger.error(f"RequestValidationError: {exc.errors()} – Body: {body.decode('utf-8')}")
+    body_bytes = await request.body()
+    logger.error(f"RequestValidationError: {exc.errors()} – Body: {body_bytes.decode('utf-8', errors='replace')}")
     return await request_validation_exception_handler(request, exc)
 
 # --- Modelos Pydantic y JWT ---
@@ -125,24 +133,35 @@ def load_supabase_file(bucket: str, path: str, as_text: bool = True) -> str | by
     except Exception as e: 
         logger.error(f"Error descargando {path} de Supabase: {e}", exc_info=True)
         raise RuntimeError(f"No se pudo cargar archivo de configuración: {path}")
-def get_tenant_openai_key(tenant_id: str, tenant_identifier: str) -> str:
-    if not supabase: raise RuntimeError("Supabase no disponible para obtener API Key de OpenAI.")
-    logger.info(f"Obteniendo API Key de OpenAI para tenant: {tenant_identifier} (ID: {tenant_id})")
-    resp = supabase.table("tenants").select("openai_api_key_encrypted").eq("id", tenant_id).single().execute()
+
+def get_tenant_config_from_db(tenant_id: str, tenant_identifier: str) -> dict:
+    if not supabase:
+        logger.error(f"Supabase no disponible al intentar obtener config para tenant '{tenant_identifier}'")
+        raise RuntimeError("Servicio de base de datos no disponible para configuración de tenant.")
+    
+    logger.info(f"Obteniendo configuración completa para tenant: {tenant_identifier} (ID: {tenant_id})")
+    # Selecciona todos los campos necesarios de una vez
+    select_fields = "openai_api_key_encrypted, pinecone_index_name, pinecone_namespace, vector_store_provider, default_language_code, priority_greetings"
+    resp = supabase.table("tenants").select(select_fields).eq("id", tenant_id).single().execute()
+
     if not resp.data: 
-        logger.error(f"Tenant {tenant_identifier} no encontrado al buscar API Key de OpenAI.")
-        raise RuntimeError(f"Inquilino {tenant_identifier} no encontrado (para API Key OpenAI).")
-    encrypted = resp.data.get("openai_api_key_encrypted")
-    if not encrypted or not encrypted.strip():
+        logger.error(f"Tenant '{tenant_identifier}' no encontrado en la base de datos o falta configuración esencial.")
+        raise RuntimeError(f"Configuración esencial no encontrada para tenant {tenant_identifier}")
+    
+    # Desencriptar la API key aquí mismo para simplificar
+    encrypted_key = resp.data.get("openai_api_key_encrypted")
+    if not encrypted_key or not encrypted_key.strip():
         logger.error(f"API Key de OpenAI encriptada faltante para {tenant_identifier}.")
         raise RuntimeError(f"API Key de OpenAI no configurada para {tenant_identifier}.")
-    try: 
-        decrypted_key = cipher.decrypt(encrypted.encode()).decode()
+    try:
+        resp.data["openai_api_key_decrypted"] = cipher.decrypt(encrypted_key.encode()).decode()
         logger.info(f"API Key de OpenAI obtenida y desencriptada para {tenant_identifier}.")
-        return decrypted_key
-    except Exception as e:
-        logger.error(f"Error desencriptando API Key de OpenAI para {tenant_identifier}: {e}", exc_info=True)
+    except Exception as e_dec:
+        logger.error(f"Error desencriptando API Key de OpenAI para {tenant_identifier}: {e_dec}", exc_info=True)
         raise RuntimeError(f"Error procesando API Key de OpenAI para {tenant_identifier}.")
+        
+    return resp.data
+
 def get_data_critico(tenant_id: str, clave: str, tenant_identifier: str) -> str | None:
     if not supabase: logger.error(f"Supabase no disponible al buscar dato crítico '{clave}' para {tenant_identifier}"); return None
     try:
@@ -238,8 +257,9 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
     logger.info(f"🚀 Nuevo /chat para tenant '{ident}' (ID: {tid}). User ID Ext: {data.user_id_external}, Conv ID: {data.conversation_id}")
     
     try:
-        # 1. Cargar configuración del tenant y API Key de OpenAI del tenant
-        tenant_openai_key = get_tenant_openai_key(tid, ident)
+        # 1. Cargar configuración completa del tenant (incluye claves, idioma, etc.)
+        tenant_config = get_tenant_config_from_db(tid, ident)
+        tenant_openai_key = tenant_config["openai_api_key_decrypted"]
         openai_client_for_tenant = AsyncOpenAI(api_key=tenant_openai_key) 
         
         logger.info(f"Cargando archivos de configuración para tenant '{ident}' desde bucket '{SUPABASE_BUCKET}'...")
@@ -248,46 +268,56 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         custom_tools = json.loads(tools_json_str)
         logger.info(f"Configuración para '{ident}' cargada: System Message Template ({len(system_md_template)} chars), Tools ({len(custom_tools)}).")
         
-        # --- DETECCIÓN DE IDIOMA DEL PRIMER MENSAJE ---
-        detected_language_code = "es" # Fallback a español
-        first_user_message_content = ""
+        # --- DETECCIÓN DE IDIOMA DEL PRIMER MENSAJE DEL USUARIO (TENANT-AWARE) ---
+        tenant_default_lang = tenant_config.get("default_language_code", "es").lower() 
+        # priority_greetings de Supabase puede ser null o una lista de strings
+        raw_priority_greetings = tenant_config.get("priority_greetings", [])
+        tenant_priority_greetings = set(g.lower().strip("!?.¡¿ ") for g in raw_priority_greetings) if raw_priority_greetings else set()
+
+        initial_detected_lang_code = tenant_default_lang 
+        first_user_message_for_detection = ""
+
         if data.history:
-            # Buscar el primer mensaje real del usuario en el historial
             for msg in data.history:
                 if msg.role == "user" and msg.content and msg.content.strip():
-                    first_user_message_content = msg.content.strip()
-                    break
+                    first_user_message_for_detection = msg.content.strip()
+                    break 
             
-            if first_user_message_content:
-                try:
-                    detected_language_code = detect_language(first_user_message_content)
-                    logger.info(f"🗣️ Idioma detectado del primer mensaje del usuario ('{first_user_message_content[:50]}...'): {detected_language_code}")
-                except LangDetectException:
-                    logger.warning(f"⚠️ No se pudo detectar el idioma para el primer mensaje: '{first_user_message_content[:50]}...'. Usando fallback a español.")
-                    detected_language_code = "es" # Fallback
+            if first_user_message_for_detection:
+                normalized_first_msg = first_user_message_for_detection.lower().strip("!?.¡¿ ")
+                
+                if tenant_priority_greetings and normalized_first_msg in tenant_priority_greetings:
+                    initial_detected_lang_code = tenant_default_lang
+                    logger.info(f"🗣️ Primer mensaje del usuario ('{first_user_message_for_detection[:50]}...') coincide con saludo priorizado para '{tenant_default_lang}'. Idioma establecido: '{tenant_default_lang}'.")
+                else:
+                    try:
+                        if len(first_user_message_for_detection) > 3: 
+                            detected_by_lib = detect_language(first_user_message_for_detection)
+                            if detected_by_lib in SUPPORTED_LANG_CODES:
+                                initial_detected_lang_code = detected_by_lib
+                                logger.info(f"🗣️ Idioma detectado (langdetect) del primer mensaje ('{first_user_message_for_detection[:50]}...'): {initial_detected_lang_code}. (Soportado)")
+                            else:
+                                logger.info(f"🗣️ Idioma detectado (langdetect) '{detected_by_lib}' no está en la lista de soportados ({SUPPORTED_LANG_CODES}). Usando default del tenant: '{tenant_default_lang}'.")
+                                initial_detected_lang_code = tenant_default_lang
+                        else:
+                            logger.info(f"🗣️ Primer mensaje ('{first_user_message_for_detection[:50]}...') demasiado corto para langdetect confiable. Usando default del tenant: '{tenant_default_lang}'.")
+                            initial_detected_lang_code = tenant_default_lang
+                    except LangDetectException: # [8]
+                        logger.warning(f"⚠️ No se pudo detectar el idioma (langdetect) para: '{first_user_message_for_detection[:50]}...'. Usando default del tenant: '{tenant_default_lang}'.")
+                        initial_detected_lang_code = tenant_default_lang
             else:
-                logger.info("ℹ️ No hay contenido en el primer mensaje del usuario para detectar idioma. Usando fallback a español.")
+                logger.info(f"ℹ️ No hay contenido en primer mensaje de usuario. Usando default del tenant: '{tenant_default_lang}'.")
         else:
-            logger.info("ℹ️ No hay historial para detectar idioma. Usando fallback a español.")
+            logger.info(f"ℹ️ No hay historial. Usando default del tenant: '{tenant_default_lang}'.")
 
-        # Añadir información del idioma detectado al system prompt
-        # Esto permite que el system_message.md pueda usar esta variable si se desea
-        # Por ahora, la instrucción principal de idioma está en el system_message.md, pero esto da más flexibilidad.
-        system_md = system_md_template.replace("{{DETECTED_LANGUAGE}}", detected_language_code)
-        # Si no usas {{DETECTED_LANGUAGE}} en tu .md, esta línea no hace nada malo.
-        # Podrías añadir una instrucción más directa al final del system_md:
-        system_md += f"\n\n[Instrucción Adicional: El usuario ha sido detectado hablando en '{detected_language_code}'. Por favor, responde consistentemente en este idioma, incluyendo el saludo inicial.]"
+        system_md = system_md_template 
+        system_md += f"\n\n[Instrucción Adicional Importante: El idioma principal establecido para esta conversación es '{initial_detected_lang_code}'. DEBES iniciar la conversación y, en general, responder en ESTE idioma. Si el usuario cambia de idioma más adelante de forma clara y sostenida, adáptate a ese nuevo idioma.]"
         # --- FIN DE DETECCIÓN DE IDIOMA ---
 
-        # 2. Obtener configuración de Pinecone para RAG
-        vs_conf_resp = supabase.table("tenants").select("pinecone_index_name, pinecone_namespace, vector_store_provider").eq("id", tid).single().execute()
-        if not vs_conf_resp.data: 
-            logger.error(f"Configuración de Vector Store (Pinecone) no encontrada para tenant '{ident}'.")
-            raise RuntimeError(f"Configuración de Vector Store no encontrada para {ident}")
-        
-        pinecone_index_name = vs_conf_resp.data.get("pinecone_index_name")
-        pinecone_namespace = vs_conf_resp.data.get("pinecone_namespace")
-        vector_provider = vs_conf_resp.data.get("vector_store_provider", "pinecone") 
+        # 2. Obtener configuración de Pinecone para RAG (ya obtenida de tenant_config)
+        pinecone_index_name = tenant_config.get("pinecone_index_name")
+        pinecone_namespace = tenant_config.get("pinecone_namespace")
+        vector_provider = tenant_config.get("vector_store_provider", "pinecone") 
         
         logger.info(f"🌲 Configuración Pinecone para '{ident}': Index='{pinecone_index_name}', Namespace='{pinecone_namespace}', Provider='{vector_provider}'")
         
@@ -300,7 +330,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
             user_query = data.history[-1].content if data.history and data.history[-1].role == "user" else ""
             if user_query:
                 try:
-                    logger.info(f"🔍 INICIANDO RAG para '{ident}'. Consulta del Usuario: '{user_query[:150]}...'")
+                    logger.info(f"🔍 INICIANDO RAG para '{ident}'. Consulta del Usuario (último mensaje): '{user_query[:150]}...'")
                     
                     query_embedding_response = await openai_client_for_tenant.embeddings.create(
                         input=[user_query], model="text-embedding-3-small" 
@@ -337,7 +367,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                                 else:
                                     logger.warning(f"🤔 Chunk con Score > {SIMILARITY_THRESHOLD} para '{ident}' pero sin contenido de texto en metadatos. ID={match.id}")
                             else:
-                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')") # Corregido el log
+                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')")
                     
                     if relevant_texts:
                         rag_context_str = "\n\n" + "="*60 + "\n"
@@ -503,3 +533,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000)) 
     logger.info(f"Iniciando Uvicorn en host 0.0.0.0 puerto {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True if os.environ.get("DEV_MODE") == "true" else False)
+
