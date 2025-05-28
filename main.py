@@ -26,6 +26,9 @@ from cryptography.fernet import Fernet
 # --- IMPORTACIÓN PARA PINECONE ---
 from pinecone import Pinecone, PineconeException
 
+# --- NUEVA IMPORTACIÓN PARA DETECCIÓN DE IDIOMA ---
+from langdetect import detect as detect_language, LangDetectException
+
 # ----------------------------
 # Carga y validación de variables de entorno
 # ----------------------------
@@ -43,7 +46,7 @@ if missing_vars:
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config") # Bucket para system_message, functions_json
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "config") 
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 JWT_ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MIN = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
@@ -55,7 +58,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 # ----------------------------
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("multi_tenant_agent_pinecone_responses_api") # Nombre del logger consistente
+logger = logging.getLogger("multi_tenant_agent_pinecone_responses_api") 
 
 # ----------------------------
 # Clientes de servicio
@@ -82,29 +85,25 @@ cipher = Fernet(ENCRYPTION_MASTER_KEY)
 # FastAPI app y CORS
 # ----------------------------
 
-app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.4") # Nueva versión
+app = FastAPI(title="Agente IA Multi-Tenant (Pinecone + Responses API)", version="1.3.6") # Nueva versión
 
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=True,
     allow_methods=["*"], allow_headers=["*"],
-) 
-# La indentación del decorador @app.exception_handler estaba corregida en tu archivo, la mantengo.
+)
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     body = await request.body(); logger.error(f"RequestValidationError: {exc.errors()} – Body: {body.decode('utf-8')}")
     return await request_validation_exception_handler(request, exc)
 
-# --- Modelos Pydantic y JWT (Idénticos a tu archivo) ---
+# --- Modelos Pydantic y JWT ---
 class TokenData(BaseModel): tenant_id: str; identifier: str
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
-
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MIN))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
-
 async def get_current_tenant(token: str = Depends(oauth2_scheme)) -> TokenData:
     creds_exc = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado", headers={"WWW-Authenticate": "Bearer"})
     try:
@@ -114,7 +113,7 @@ async def get_current_tenant(token: str = Depends(oauth2_scheme)) -> TokenData:
         return TokenData(tenant_id=tid, identifier=ident)
     except JWTError: raise creds_exc
 
-# --- Helpers (Idénticos a tu archivo, con el logging que ya tenías) ---
+# --- Helpers ---
 def load_supabase_file(bucket: str, path: str, as_text: bool = True) -> str | bytes:
     if not supabase: raise RuntimeError("Supabase no disponible.")
     if ".." in path or path.startswith("/"): raise ValueError(f"Ruta inválida: {path}")
@@ -126,7 +125,6 @@ def load_supabase_file(bucket: str, path: str, as_text: bool = True) -> str | by
     except Exception as e: 
         logger.error(f"Error descargando {path} de Supabase: {e}", exc_info=True)
         raise RuntimeError(f"No se pudo cargar archivo de configuración: {path}")
-
 def get_tenant_openai_key(tenant_id: str, tenant_identifier: str) -> str:
     if not supabase: raise RuntimeError("Supabase no disponible para obtener API Key de OpenAI.")
     logger.info(f"Obteniendo API Key de OpenAI para tenant: {tenant_identifier} (ID: {tenant_id})")
@@ -145,7 +143,6 @@ def get_tenant_openai_key(tenant_id: str, tenant_identifier: str) -> str:
     except Exception as e:
         logger.error(f"Error desencriptando API Key de OpenAI para {tenant_identifier}: {e}", exc_info=True)
         raise RuntimeError(f"Error procesando API Key de OpenAI para {tenant_identifier}.")
-
 def get_data_critico(tenant_id: str, clave: str, tenant_identifier: str) -> str | None:
     if not supabase: logger.error(f"Supabase no disponible al buscar dato crítico '{clave}' para {tenant_identifier}"); return None
     try:
@@ -157,21 +154,16 @@ def get_data_critico(tenant_id: str, clave: str, tenant_identifier: str) -> str 
         logger.info(f"Dato crítico '{clave}' no encontrado o valor vacío para {tenant_identifier}.")
         return None
     except Exception as e: logger.error(f"Excepción al obtener dato crítico '{clave}' para {tenant_identifier}: {e}", exc_info=True); return None
-
 class EmailCheckModel(BaseModel): email: EmailStr
-
 async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str) -> dict:
     name = call_obj.name
     arguments_str = call_obj.arguments
     logger.info(f"Procesando llamada a función (webhook): '{name}' para tenant {tenant_identifier} con argumentos: {arguments_str}")
-    
     if not supabase: return {"success": False, "error": "Servicio de configuración (Supabase) no disponible para manejar función."}
-    
     resp_webhook = supabase.table("tenants").select("recoleccion_webhook_url").eq("id", tenant_id).single().execute()
     if not resp_webhook.data or not resp_webhook.data.get("recoleccion_webhook_url"):
         logger.warning(f"No hay URL de webhook configurada en tabla 'tenants' para {tenant_identifier} para la función '{name}'.")
         return {"success": False, "error": f"Función '{name}' no puede ser procesada: falta URL de webhook."}
-    
     url = resp_webhook.data.get("recoleccion_webhook_url")
     try:
         args_dict = json.loads(arguments_str)
@@ -180,21 +172,17 @@ async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str)
             except ValidationError as ve:
                 logger.warning(f"Validación de email fallida en handle_function_call para '{args_dict['email']}' en {tenant_identifier}: {ve.errors()}")
                 return {"success": False, "error": f"El email proporcionado no es válido: {args_dict['email']}"} 
-        
         payload = {**args_dict, "_tenant_info": {"id": tenant_id, "identifier": tenant_identifier, "function_name": name}}
         logger.info(f"Enviando datos de función '{name}' a webhook '{url}' para {tenant_identifier}. Payload: {payload}")
         r = requests.post(url, json=payload, timeout=15) 
         r.raise_for_status() 
         logger.info(f"Webhook para {tenant_identifier} (función '{name}') respondió con status {r.status_code}.")
-        
         try:
             response_data_webhook = r.json()
         except json.JSONDecodeError:
             logger.warning(f"Respuesta del webhook para {name} de {tenant_identifier} no es JSON. Raw: {r.text[:200]}")
             response_data_webhook = {"raw_response": r.text[:500]} 
-
         return {"success": True, "status_code": r.status_code, "function_name": name, "response_data": response_data_webhook}
-
     except requests.exceptions.Timeout:
         logger.error(f"Timeout llamando a webhook '{url}' para {tenant_identifier} (función '{name}').")
         return {"success": False, "error": "El servicio externo tardó demasiado en responder."}
@@ -206,7 +194,7 @@ async def handle_function_call(call_obj, tenant_id: str, tenant_identifier: str)
         logger.error(f"Error general en handle_function_call para '{name}' de {tenant_identifier}: {e}", exc_info=True)
         return {"success": False, "error": f"Error interno procesando la función: {str(e)}"}
 
-# --- Modelos Pydantic para Chat (Idénticos a tu archivo) ---
+# --- Modelos Pydantic para Chat ---
 class ChatMessage(BaseModel): role: str; content: str
 class ChatRequest(BaseModel):
     history: list[ChatMessage]; conversation_id: str | None = None; user_id_external: str | None = None
@@ -218,7 +206,7 @@ class ChatRequest(BaseModel):
 class ChatResponseData(BaseModel): type: str = "text"; text: str | None
 class ChatApiResponse(BaseModel): response: ChatResponseData
 
-# --- Endpoint de Token (Idéntico a tu archivo) ---
+# --- Endpoint de Token ---
 @app.post("/token", summary="Obtener JWT para tenant")
 async def token_endpoint(api_key_botpress: str = Form(...)):
     if not supabase: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Servicio de base de datos no disponible.")
@@ -255,11 +243,42 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         openai_client_for_tenant = AsyncOpenAI(api_key=tenant_openai_key) 
         
         logger.info(f"Cargando archivos de configuración para tenant '{ident}' desde bucket '{SUPABASE_BUCKET}'...")
-        system_md = load_supabase_file(SUPABASE_BUCKET, f"{ident}/system_message_{ident}.md")
+        system_md_template = load_supabase_file(SUPABASE_BUCKET, f"{ident}/system_message_{ident}.md")
         tools_json_str = load_supabase_file(SUPABASE_BUCKET, f"{ident}/functions_{ident}.json")
         custom_tools = json.loads(tools_json_str)
-        logger.info(f"Configuración para '{ident}' cargada: System Message ({len(system_md)} chars), Tools ({len(custom_tools)}).")
+        logger.info(f"Configuración para '{ident}' cargada: System Message Template ({len(system_md_template)} chars), Tools ({len(custom_tools)}).")
         
+        # --- DETECCIÓN DE IDIOMA DEL PRIMER MENSAJE ---
+        detected_language_code = "es" # Fallback a español
+        first_user_message_content = ""
+        if data.history:
+            # Buscar el primer mensaje real del usuario en el historial
+            for msg in data.history:
+                if msg.role == "user" and msg.content and msg.content.strip():
+                    first_user_message_content = msg.content.strip()
+                    break
+            
+            if first_user_message_content:
+                try:
+                    detected_language_code = detect_language(first_user_message_content)
+                    logger.info(f"🗣️ Idioma detectado del primer mensaje del usuario ('{first_user_message_content[:50]}...'): {detected_language_code}")
+                except LangDetectException:
+                    logger.warning(f"⚠️ No se pudo detectar el idioma para el primer mensaje: '{first_user_message_content[:50]}...'. Usando fallback a español.")
+                    detected_language_code = "es" # Fallback
+            else:
+                logger.info("ℹ️ No hay contenido en el primer mensaje del usuario para detectar idioma. Usando fallback a español.")
+        else:
+            logger.info("ℹ️ No hay historial para detectar idioma. Usando fallback a español.")
+
+        # Añadir información del idioma detectado al system prompt
+        # Esto permite que el system_message.md pueda usar esta variable si se desea
+        # Por ahora, la instrucción principal de idioma está en el system_message.md, pero esto da más flexibilidad.
+        system_md = system_md_template.replace("{{DETECTED_LANGUAGE}}", detected_language_code)
+        # Si no usas {{DETECTED_LANGUAGE}} en tu .md, esta línea no hace nada malo.
+        # Podrías añadir una instrucción más directa al final del system_md:
+        system_md += f"\n\n[Instrucción Adicional: El usuario ha sido detectado hablando en '{detected_language_code}'. Por favor, responde consistentemente en este idioma, incluyendo el saludo inicial.]"
+        # --- FIN DE DETECCIÓN DE IDIOMA ---
+
         # 2. Obtener configuración de Pinecone para RAG
         vs_conf_resp = supabase.table("tenants").select("pinecone_index_name, pinecone_namespace, vector_store_provider").eq("id", tid).single().execute()
         if not vs_conf_resp.data: 
@@ -274,13 +293,8 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         
         rag_context_str = "" 
         
-        # --- UMBRAL DE SIMILITUD PARA RAG ---
-        # Ajustar este valor según las pruebas con los logs y la calidad de las respuestas.
-        # Para chunks grandes (ej. 2000 caracteres), un umbral más alto puede ser apropiado.
-        # Empezar con 0.65 e iterar.
         SIMILARITY_THRESHOLD = 0.30 
         logger.info(f"🔬 Usando umbral de similitud para RAG: {SIMILARITY_THRESHOLD}")
-        # --- FIN DEL AJUSTE ---
 
         if vector_provider == "pinecone" and pinecone_index_name and pinecone_namespace and data.history:
             user_query = data.history[-1].content if data.history and data.history[-1].role == "user" else ""
@@ -323,7 +337,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
                                 else:
                                     logger.warning(f"🤔 Chunk con Score > {SIMILARITY_THRESHOLD} para '{ident}' pero sin contenido de texto en metadatos. ID={match.id}")
                             else:
-                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')")
+                                logger.info(f"👎 Chunk EXCLUIDO para '{ident}' (Score: {match.score:.4f} <= {SIMILARITY_THRESHOLD}, Doc: '{doc_name}')") # Corregido el log
                     
                     if relevant_texts:
                         rag_context_str = "\n\n" + "="*60 + "\n"
@@ -480,7 +494,7 @@ async def chat_endpoint(data: ChatRequest = Body(...), tenant: TokenData = Depen
         logger.error(f"Error INESPERADO y CRÍTICO en /chat para '{ident}': {str(e_gen)}", exc_info=True)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Error interno inesperado procesando su solicitud.")
 
-# --- Health Check y Uvicorn run (Idéntico a tu archivo) ---
+# --- Health Check y Uvicorn run ---
 @app.get("/health", summary="Health check")
 async def health_check(): return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
 
