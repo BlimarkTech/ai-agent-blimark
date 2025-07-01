@@ -4,11 +4,12 @@ import os
 import logging
 import json
 import asyncio
-from typing import Dict, Any, AsyncGenerator, List
+import requests
+from typing import Dict, Any, AsyncGenerator, List, Optional
 from datetime import datetime, timedelta, timezone
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Body, HTTPException, Depends, status, Form, Request, BackgroundTasks
+from fastapi import FastAPI, Body, HTTPException, Depends, status, Form, Request, BackgroundTasks, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -93,7 +94,7 @@ cipher = Fernet(ENCRYPTION_MASTER_KEY)
 # ----------------------------
 # FastAPI app y CORS
 # ----------------------------
-app = FastAPI(title="Agente IA Multi-Tenant v2 (Streaming + Cache)", version="2.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant v2 (Streaming + Cache)", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -114,7 +115,7 @@ class TokenData(BaseModel):
     tenant_id: str
     identifier: str
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
 
 def create_access_token(data: dict, expires_delta: timedelta | None = None) -> str:
     to_encode = data.copy()
@@ -122,12 +123,31 @@ def create_access_token(data: dict, expires_delta: timedelta | None = None) -> s
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
 
-async def get_current_tenant(token: str = Depends(oauth2_scheme)) -> TokenData:
-    creds_exc = HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token inválido o expirado", headers={"WWW-Authenticate": "Bearer"})
+async def get_current_tenant(
+    token_header: Optional[str] = Depends(oauth2_scheme),
+    token_query: Optional[str] = Query(None, alias="bp-access-token")
+) -> TokenData:
+    
+    token = token_header or token_query
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="No se proporcionó token de autenticación",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    creds_exc = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token inválido o expirado",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    
     try:
         payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
         tid, ident = payload.get("tenant_id"), payload.get("identifier")
-        if not tid or not ident: raise creds_exc
+        if not tid or not ident:
+            raise creds_exc
         return TokenData(tenant_id=tid, identifier=ident)
     except JWTError:
         raise creds_exc
@@ -168,8 +188,6 @@ async def get_or_load_tenant_config(tenant_id: str, tenant_identifier: str) -> D
 
     logger.info(f"⏳ Configuración para tenant '{tenant_identifier}' no encontrada en caché. Cargando...")
     try:
-        # NOTE: These are blocking I/O calls. For very high concurrency,
-        # run them in a thread pool using asyncio.to_thread.
         config_from_db = get_tenant_config_from_db(tenant_id, tenant_identifier)
         system_md_template = load_supabase_file(SUPABASE_BUCKET, f"{tenant_identifier}/system_message_{tenant_identifier}.md")
         tools_json_str = load_supabase_file(SUPABASE_BUCKET, f"{tenant_identifier}/functions_{tenant_identifier}.json")
@@ -275,48 +293,54 @@ async def stream_chat_generator(
         yield f"data: {json.dumps(payload)}\n\n"
 
     try:
-        # --- Primer stream ---
         logger.info(f"🤖 STREAM 1: Llamando a OpenAI para '{ident}'. RAG usado: {'SÍ' if rag_context else 'NO'}")
-        stream1 = await openai_client.responses.create(model="gpt-4.1", input=input_messages, tools=tools, stream=True)
+        stream1 = await openai_client.chat.completions.create(model="gpt-4.1", messages=input_messages, tools=tools, stream=True)
         
         accumulated_tool_calls = []
         async for chunk in stream1:
-            if chunk.output and chunk.output[0]:
-                item = chunk.output[0]
-                if item.type == "text" and item.content and item.content[0].text:
-                    text_delta = item.content[0].text
-                    full_assistant_response += text_delta
-                    payload = {"type": "content_delta", "data": text_delta}
-                    yield f"data: {json.dumps(payload)}\n\n"
-                elif item.type == "function_call":
-                    logger.info(f"🔧 Función detectada en stream para '{ident}': {item.name}")
-                    accumulated_tool_calls.append(item)
+            delta = chunk.choices[0].delta
+            if delta.content:
+                full_assistant_response += delta.content
+                payload = {"type": "content_delta", "data": delta.content}
+                yield f"data: {json.dumps(payload)}\n\n"
+            if delta.tool_calls:
+                # Assuming one tool call for simplicity as per original logic
+                if not accumulated_tool_calls:
+                    accumulated_tool_calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
+                
+                tc_chunk = delta.tool_calls[0]
+                if tc_chunk.id:
+                    accumulated_tool_calls[0]["id"] = tc_chunk.id
+                if tc_chunk.function:
+                    if tc_chunk.function.name:
+                        accumulated_tool_calls[0]["function"]["name"] = tc_chunk.function.name
+                    if tc_chunk.function.arguments:
+                        accumulated_tool_calls[0]["function"]["arguments"] += tc_chunk.function.arguments
 
-        # --- Procesar llamadas a funciones si existen ---
         if accumulated_tool_calls:
-            fc_item = accumulated_tool_calls[0] # Simplificando a una sola llamada por turno
-            input_messages.append({"type": "function_call", "call_id": fc_item.call_id, "name": fc_item.name, "arguments": fc_item.arguments})
+            tool_call = accumulated_tool_calls[0]
+            logger.info(f"🔧 Función detectada en stream para '{ident}': {tool_call['function']['name']}")
             
+            # Reconstruct the tool call object for handle_function_call
+            class MockCall:
+                def __init__(self, name, args):
+                    self.name = name
+                    self.arguments = args
+            
+            fc_item = MockCall(tool_call['function']['name'], tool_call['function']['arguments'])
             fc_result = await handle_function_call(fc_item, tid, ident)
-            input_messages.append({"type": "function_call_output", "call_id": fc_item.call_id, "output": json.dumps(fc_result)})
+            
+            input_messages.append({"role": "assistant", "tool_calls": [tool_call]})
+            input_messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(fc_result)})
 
-            # --- Segundo stream con resultado de la función ---
             logger.info(f"📞 STREAM 2: Llamando a OpenAI con resultado de función para '{ident}'.")
-            stream2 = await openai_client.responses.create(model="gpt-4.1", input=input_messages, tools=tools, stream=True)
+            stream2 = await openai_client.chat.completions.create(model="gpt-4.1", messages=input_messages, stream=True)
             
             async for chunk in stream2:
-                if chunk.output and chunk.output[0] and chunk.output[0].type == "text" and chunk.output[0].content and chunk.output[0].content[0].text:
-                    text_delta = chunk.output[0].content[0].text
+                if chunk.choices[0].delta.content:
+                    text_delta = chunk.choices[0].delta.content
                     full_assistant_response += text_delta
                     payload = {"type": "content_delta", "data": text_delta}
-                    yield f"data: {json.dumps(payload)}\n\n"
-            
-            if fc_result.get("success"):
-                clave_texto = f"post_text_{fc_item.name}"
-                texto_personalizado = get_data_critico(tid, clave_texto, ident)
-                if texto_personalizado and texto_personalizado not in full_assistant_response:
-                    full_assistant_response += f"\n\n{texto_personalizado}"
-                    payload = {"type": "content_delta", "data": f"\n\n{texto_personalizado}"}
                     yield f"data: {json.dumps(payload)}\n\n"
 
     except OpenAIError as e:
@@ -324,7 +348,6 @@ async def stream_chat_generator(
         await yield_error("Error comunicándose con el asistente.")
         return
 
-    # --- Guardar historial en background y finalizar stream ---
     last_user_message = request_data.history[-1].content if request_data.history else ""
     conv_id = request_data.conversation_id or f"conv_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S%f')}_{ident}"
     user_ext_id = request_data.user_id_external or "unknown_user"
@@ -333,6 +356,7 @@ async def stream_chat_generator(
     
     payload = {"type": "end_of_stream", "conversation_id": conv_id}
     yield f"data: {json.dumps(payload)}\n\n"
+
 
 # --- Endpoint /chat con Cache y Streaming ---
 @app.post("/chat", summary="Chat multi-tenant con streaming, caché y RAG")
@@ -346,11 +370,9 @@ async def chat_endpoint(
     logger.info(f"🚀 Nuevo /chat (STREAMING) para tenant '{ident}' (ID: {tid}).")
 
     try:
-        # 1. Cargar configuración del tenant usando caché
         tenant_config = await get_or_load_tenant_config(tid, ident)
         openai_client = AsyncOpenAI(api_key=tenant_config["openai_api_key_decrypted"])
         
-        # 2. Detección de idioma
         tenant_default_lang = tenant_config.get("default_language_code", "es").lower()
         initial_lang_code = tenant_default_lang
         if data.history and (user_msg := data.history[-1].content.strip()):
@@ -360,13 +382,13 @@ async def chat_endpoint(
             except LangDetectException: pass
         system_md = tenant_config["system_md_template"] + f"\n\n[Instrucción: El idioma de la conversación es '{initial_lang_code}'. Responde en este idioma.]"
         
-        # 3. RAG Context Retrieval
         rag_context_str = ""
         if (idx := tenant_config.get("pinecone_index_name")) and (ns := tenant_config.get("pinecone_namespace")) and data.history:
             try:
                 user_query = data.history[-1].content
                 emb_res = await openai_client.embeddings.create(input=[user_query], model="text-embedding-3-small")
-                query_res = pc.Index(idx).query(namespace=ns, vector=emb_res.data[0].embedding, top_k=5, include_metadata=True)
+                pinecone_index = pc.Index(idx)
+                query_res = pinecone_index.query(namespace=ns, vector=emb_res.data[0].embedding, top_k=5, include_metadata=True)
                 relevant = [m.metadata.get('text', '') for m in query_res.matches if m.score > 0.30 and m.metadata]
                 if relevant:
                     rag_context_str = "\n\n--- CONTEXTO ---\n" + "\n\n".join(relevant) + "\n--- FIN CONTEXTO ---"
@@ -374,7 +396,6 @@ async def chat_endpoint(
             except (PineconeException, OpenAIError) as e:
                 logger.error(f"❌ Error durante RAG para '{ident}': {e}")
 
-        # 4. Preparar y ejecutar el generador
         effective_system_message = system_md + rag_context_str
         input_messages = [{"role": "system", "content": effective_system_message}] + [msg.model_dump() for msg in data.history]
         
