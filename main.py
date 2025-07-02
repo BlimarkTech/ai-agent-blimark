@@ -44,6 +44,7 @@ SUPPORTED_LANG_CODES = {"es", "it", "pt", "en", "fr", "de"}
 
 # --- Global Cache & Clients ---
 TENANT_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
+PINECONE_INDEX_CACHE: Dict[str, Any] = {} # OPTIMIZATION: Cache for Pinecone index connections
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -54,7 +55,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="8.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Production Ready)", version="9.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -91,7 +92,6 @@ async def get_current_tenant(
 
 # --- Helper Functions ---
 def load_supabase_file(path: str) -> str:
-    logger.info(f"Descargando de Supabase: {path}")
     return supabase.storage.from_(SUPABASE_BUCKET).download(path).decode("utf-8")
 
 async def get_or_load_tenant_config(tenant_id: str, tenant_identifier: str) -> Dict[str, Any]:
@@ -132,7 +132,6 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
         response = requests.post(webhook_url, json=payload, timeout=15)
         response.raise_for_status()
         
-        # CORRECCIÓN DEFINITIVA: Usar try/except para manejar JSONDecodeError
         try:
             return {"success": True, "data": response.json()}
         except JSONDecodeError:
@@ -230,8 +229,13 @@ async def chat_endpoint(bg_tasks: BackgroundTasks, data: ChatRequest, tenant: To
         rag_ctx = ""
         if (idx := config.get("pinecone_index_name")) and (ns := config.get("pinecone_namespace")) and data.history:
             try:
+                # OPTIMIZATION: Get Pinecone index from cache or initialize it
+                if idx not in PINECONE_INDEX_CACHE:
+                    PINECONE_INDEX_CACHE[idx] = pc.Index(idx)
+                pinecone_index = PINECONE_INDEX_CACHE[idx]
+
                 emb = await client.embeddings.create(input=[data.history[-1].content], model="text-embedding-3-small")
-                matches = pc.Index(idx).query(namespace=ns, vector=emb.data[0].embedding, top_k=5, include_metadata=True).matches
+                matches = pinecone_index.query(namespace=ns, vector=emb.data[0].embedding, top_k=5, include_metadata=True).matches
                 if relevant_texts := [m.metadata['text'] for m in matches if m.score > 0.3 and 'text' in m.metadata]:
                     rag_ctx = "\n\n--- CONTEXTO ---\n" + "\n\n".join(relevant_texts) + "\n--- FIN CONTEXTO ---"
             except Exception as e:
