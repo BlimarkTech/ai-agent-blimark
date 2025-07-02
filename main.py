@@ -7,6 +7,7 @@ import asyncio
 import requests
 from typing import Dict, Any, AsyncGenerator, List, Optional
 from datetime import datetime, timedelta, timezone
+from json.decoder import JSONDecodeError
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Body, HTTPException, Depends, status, Form, Request, BackgroundTasks, Query
@@ -53,7 +54,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="7.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="8.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -129,15 +130,12 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
         args_dict = json.loads(args_str)
         payload = {**args_dict, "_tenant_info": tenant_info}
         response = requests.post(webhook_url, json=payload, timeout=15)
-        
-        # FIX DEFINITIVO: Separar raise_for_status() de la comprobación del contenido.
-        # Primero, asegurar que la petición fue exitosa (código 2xx).
         response.raise_for_status()
         
-        # Segundo, procesar la respuesta SOLO si tiene contenido.
-        if response.text and response.text.strip():
+        # CORRECCIÓN DEFINITIVA: Usar try/except para manejar JSONDecodeError
+        try:
             return {"success": True, "data": response.json()}
-        else:
+        except JSONDecodeError:
             return {"success": True, "data": "Webhook ejecutado exitosamente sin contenido de respuesta."}
             
     except Exception as e:
