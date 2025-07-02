@@ -53,7 +53,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="6.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="7.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -130,10 +130,12 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
         payload = {**args_dict, "_tenant_info": tenant_info}
         response = requests.post(webhook_url, json=payload, timeout=15)
         
-        # FIX: Separate raise_for_status() from the response check
+        # FIX DEFINITIVO: Separar raise_for_status() de la comprobación del contenido.
+        # Primero, asegurar que la petición fue exitosa (código 2xx).
         response.raise_for_status()
         
-        if response.text:
+        # Segundo, procesar la respuesta SOLO si tiene contenido.
+        if response.text and response.text.strip():
             return {"success": True, "data": response.json()}
         else:
             return {"success": True, "data": "Webhook ejecutado exitosamente sin contenido de respuesta."}
