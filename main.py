@@ -26,7 +26,7 @@ from langdetect import detect as detect_language, LangDetectException, DetectorF
 DetectorFactory.seed = 0
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("multi_tenant_agent_v5_final")
+logger = logging.getLogger("multi_tenant_agent_final")
 
 # --- Constants & Config ---
 REQUIRED_VARS = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "JWT_SECRET_KEY", "ENCRYPTION_MASTER_KEY", "PINECONE_API_KEY"]
@@ -53,7 +53,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant v5 (Final Fix)", version="5.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="6.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -129,13 +129,14 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
         args_dict = json.loads(args_str)
         payload = {**args_dict, "_tenant_info": tenant_info}
         response = requests.post(webhook_url, json=payload, timeout=15)
+        
+        # FIX: Separate raise_for_status() from the response check
         response.raise_for_status()
         
-        # FIX 2: Handle empty webhook response to prevent JSON decode error
         if response.text:
             return {"success": True, "data": response.json()}
         else:
-            return {"success": True, "data": "Webhook ejecutado exitosamente."}
+            return {"success": True, "data": "Webhook ejecutado exitosamente sin contenido de respuesta."}
             
     except Exception as e:
         logger.error(f"Error en webhook para '{name}': {e}")
@@ -178,7 +179,6 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
         if tool_calls:
             messages.append({"role": "assistant", "tool_calls": tool_calls})
             
-            # Procesar todas las llamadas a herramientas y agregar sus resultados
             for tool_call in tool_calls:
                 result = handle_function_call(tool_call, config, tenant_info)
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
@@ -197,7 +197,6 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
     finally:
         conv_id = req_data.conversation_id or f"conv_{datetime.now(timezone.utc).isoformat()}"
         if full_assistant_response and req_data.history:
-            # FIX 1: Use tenant_info["tenant_id"] instead of tenant_info["id"]
             bg_tasks.add_task(save_chat_history_to_db, tenant_info["tenant_id"], conv_id, req_data.user_id_external or "unknown", req_data.history[-1].content, full_assistant_response.strip())
         yield f"data: {json.dumps({'type': 'end_of_stream', 'conversation_id': conv_id})}\n\n"
 
