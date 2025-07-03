@@ -44,7 +44,7 @@ SUPPORTED_LANG_CODES = {"es", "it", "pt", "en", "fr", "de"}
 
 # --- Global Cache & Clients ---
 TENANT_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
-PINECONE_INDEX_CACHE: Dict[str, Any] = {} # OPTIMIZATION: Cache for Pinecone index connections
+PINECONE_INDEX_CACHE: Dict[str, Any] = {}
 try:
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
     pc = Pinecone(api_key=PINECONE_API_KEY)
@@ -55,7 +55,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Production Ready)", version="9.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="10.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -93,6 +93,16 @@ async def get_current_tenant(
 # --- Helper Functions ---
 def load_supabase_file(path: str) -> str:
     return supabase.storage.from_(SUPABASE_BUCKET).download(path).decode("utf-8")
+
+# FIX: Re-added the get_data_critico function from the old codebase
+def get_data_critico(tenant_id: str, clave: str) -> str | None:
+    if not supabase: return None
+    try:
+        resp = supabase.table("datos_criticos").select("valor").eq("clave", clave).eq("tenant_id", tenant_id).maybe_single().execute()
+        return resp.data.get("valor") if resp and resp.data else None
+    except Exception as e:
+        logger.error(f"Excepción al obtener dato crítico '{clave}': {e}")
+        return None
 
 async def get_or_load_tenant_config(tenant_id: str, tenant_identifier: str) -> Dict[str, Any]:
     if tenant_id in TENANT_CONFIG_CACHE:
@@ -181,7 +191,18 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
             for tool_call in tool_calls:
                 result = handle_function_call(tool_call, config, tenant_info)
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
-            
+
+                # FIX: Re-added the logic to fetch and append critical data (like the planner link)
+                if result.get("success"):
+                    function_name = tool_call.get("function", {}).get("name")
+                    if function_name:
+                        clave_critica = f"post_text_{function_name}"
+                        texto_adicional = get_data_critico(tenant_info["tenant_id"], clave_critica)
+                        if texto_adicional:
+                            full_assistant_response += f"\n\n{texto_adicional}"
+                            yield f"data: {json.dumps({'type': 'content_delta', 'data': f'\\n\\n{texto_adicional}'})}\n\n"
+                            logger.info(f"Texto crítico '{clave_critica}' añadido a la respuesta.")
+
             stream2 = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True)
             async for chunk in stream2:
                 if chunk.choices[0].delta.content:
@@ -229,11 +250,9 @@ async def chat_endpoint(bg_tasks: BackgroundTasks, data: ChatRequest, tenant: To
         rag_ctx = ""
         if (idx := config.get("pinecone_index_name")) and (ns := config.get("pinecone_namespace")) and data.history:
             try:
-                # OPTIMIZATION: Get Pinecone index from cache or initialize it
                 if idx not in PINECONE_INDEX_CACHE:
                     PINECONE_INDEX_CACHE[idx] = pc.Index(idx)
                 pinecone_index = PINECONE_INDEX_CACHE[idx]
-
                 emb = await client.embeddings.create(input=[data.history[-1].content], model="text-embedding-3-small")
                 matches = pinecone_index.query(namespace=ns, vector=emb.data[0].embedding, top_k=5, include_metadata=True).matches
                 if relevant_texts := [m.metadata['text'] for m in matches if m.score > 0.3 and 'text' in m.metadata]:
