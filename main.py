@@ -55,7 +55,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="10.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="11.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -94,7 +94,6 @@ async def get_current_tenant(
 def load_supabase_file(path: str) -> str:
     return supabase.storage.from_(SUPABASE_BUCKET).download(path).decode("utf-8")
 
-# FIX: Re-added the get_data_critico function from the old codebase
 def get_data_critico(tenant_id: str, clave: str) -> str | None:
     if not supabase: return None
     try:
@@ -192,15 +191,16 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
                 result = handle_function_call(tool_call, config, tenant_info)
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
 
-                # FIX: Re-added the logic to fetch and append critical data (like the planner link)
                 if result.get("success"):
                     function_name = tool_call.get("function", {}).get("name")
                     if function_name:
                         clave_critica = f"post_text_{function_name}"
                         texto_adicional = get_data_critico(tenant_info["tenant_id"], clave_critica)
                         if texto_adicional:
-                            full_assistant_response += f"\n\n{texto_adicional}"
-                            yield f"data: {json.dumps({'type': 'content_delta', 'data': f'\\n\\n{texto_adicional}'})}\n\n"
+                            # FIX: Corrected SyntaxError: f-string expression part cannot include a backslash
+                            texto_con_salto = f"\n\n{texto_adicional}"
+                            full_assistant_response += texto_con_salto
+                            yield f"data: {json.dumps({'type': 'content_delta', 'data': texto_con_salto})}\n\n"
                             logger.info(f"Texto crítico '{clave_critica}' añadido a la respuesta.")
 
             stream2 = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True)
