@@ -1,0 +1,6 @@
+{
+  "required": [
+    "mensaje"
+  ],
+  "additionalProperties": false
+} 

@@ -55,7 +55,7 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
-app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="11.0.0")
+app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="12.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
@@ -187,28 +187,34 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
         if tool_calls:
             messages.append({"role": "assistant", "tool_calls": tool_calls})
             
+            # Guardar información de la herramienta para usar después
+            tool_success_info = []
             for tool_call in tool_calls:
                 result = handle_function_call(tool_call, config, tenant_info)
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
-
+                
                 if result.get("success"):
                     function_name = tool_call.get("function", {}).get("name")
                     if function_name:
                         clave_critica = f"post_text_{function_name}"
                         texto_adicional = get_data_critico(tenant_info["tenant_id"], clave_critica)
                         if texto_adicional:
-                            # FIX: Corrected SyntaxError: f-string expression part cannot include a backslash
-                            texto_con_salto = f"\n\n{texto_adicional}"
-                            full_assistant_response += texto_con_salto
-                            yield f"data: {json.dumps({'type': 'content_delta', 'data': texto_con_salto})}\n\n"
-                            logger.info(f"Texto crítico '{clave_critica}' añadido a la respuesta.")
+                            tool_success_info.append(texto_adicional)
 
+            # Primero: generar la respuesta de OpenAI
             stream2 = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True)
             async for chunk in stream2:
                 if chunk.choices[0].delta.content:
                     delta_content = chunk.choices[0].delta.content
                     full_assistant_response += delta_content
                     yield f"data: {json.dumps({'type': 'content_delta', 'data': delta_content})}\n\n"
+
+            # Segundo: añadir el texto crítico DESPUÉS de la respuesta de OpenAI
+            for texto_adicional in tool_success_info:
+                texto_con_salto = f"\n\n{texto_adicional}"
+                full_assistant_response += texto_con_salto
+                yield f"data: {json.dumps({'type': 'content_delta', 'data': texto_con_salto})}\n\n"
+                logger.info(f"Texto crítico añadido después de la respuesta de OpenAI.")
 
     except OpenAIError as e:
         logger.error(f"Error de OpenAI para '{tenant_info['identifier']}': {e}", exc_info=True)
