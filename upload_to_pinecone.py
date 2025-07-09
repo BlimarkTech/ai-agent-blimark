@@ -17,18 +17,14 @@ from cryptography.fernet import Fernet
 load_dotenv()
 
 # --- Configuración del Logger ---
-# Se configura el sistema de logging para mostrar información útil en la consola.
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("pinecone_sync_manager_strict_keys")
 
 # --- Configuración de Constantes y Claves ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-
-# Limpia el nombre del bucket para evitar errores de formato (espacios, comillas).
 SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "vector-store").strip()
 
-# Línea de depuración para verificar el nombre del bucket en la ejecución.
 logger.info(f"DEBUG: Nombre del bucket limpio y listo para usar: '[{SUPABASE_BUCKET}]'")
 
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -106,7 +102,6 @@ def get_markdown_chunks(markdown_content: str) -> list[str]:
 def get_embedding_openai(client: SyncOpenAI, text_chunk: str) -> list[float] | None:
     """Genera el embedding para un chunk de texto usando OpenAI."""
     try:
-        # Reemplaza el caracter nulo que causa errores en la API de OpenAI
         clean_text = text_chunk.replace("\x00", "\uFFFD")
         if not clean_text.strip():
             return None
@@ -159,6 +154,7 @@ def sync_tenant_documents_to_pinecone(tenant: dict):
         logger.error(f"{identifier}: Error al obtener el manifiesto de archivos: {e}")
         manifest = {}
 
+    # Procesar archivos nuevos o modificados
     for file_metadata in md_files:
         file_path = f"{identifier}/{file_metadata['name']}"
         document_name = os.path.splitext(file_metadata['name'])[0]
@@ -234,6 +230,38 @@ def sync_tenant_documents_to_pinecone(tenant: dict):
             logger.info(f"{identifier}: Manifiesto {'creado' if is_new else 'actualizado'} para '{file_path}'.")
         except Exception as e:
             logger.error(f"{identifier}: Error actualizando el manifiesto para '{file_path}': {e}")
+
+    # === NUEVA FUNCIONALIDAD: Limpieza de vectores huérfanos ===
+    # Eliminar vectores de archivos que ya no existen en Supabase
+    current_file_paths = {f"{identifier}/{f['name']}" for f in md_files}
+    manifest_file_paths = set(manifest.keys())
+    
+    # Archivos que están en el manifiesto pero ya no en Supabase (fueron eliminados)
+    deleted_files = manifest_file_paths - current_file_paths
+    
+    if deleted_files:
+        logger.info(f"{identifier}: Se detectaron {len(deleted_files)} archivos eliminados de Supabase.")
+        for deleted_file_path in deleted_files:
+            deleted_manifest_entry = manifest[deleted_file_path]
+            
+            # Eliminar vectores de Pinecone
+            if deleted_manifest_entry.get("pinecone_vector_ids"):
+                delete_vectors_from_pinecone(
+                    pinecone_index, 
+                    namespace, 
+                    deleted_manifest_entry["pinecone_vector_ids"]
+                )
+                logger.info(f"{identifier}: Vectores eliminados de Pinecone para archivo borrado: '{deleted_file_path}'")
+            
+            # Eliminar entrada del manifiesto
+            try:
+                supabase_client.table("vector_store_file_manifest").delete().eq("id", deleted_manifest_entry["id"]).execute()
+                logger.info(f"{identifier}: Entrada del manifiesto eliminada para: '{deleted_file_path}'")
+            except Exception as e:
+                logger.error(f"{identifier}: Error eliminando entrada del manifiesto para '{deleted_file_path}': {e}")
+    else:
+        logger.info(f"{identifier}: No se detectaron archivos eliminados.")
+    # === FIN de la nueva funcionalidad ===
             
     logger.info(f"Sincronización completada para el tenant '{identifier}'.")
 
