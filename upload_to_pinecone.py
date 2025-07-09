@@ -18,7 +18,8 @@ load_dotenv()
 # --- Configuración ---
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
-SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "vector-store")
+SUPABASE_BUCKET = os.getenv("SUPABASE_BUCKET", "vector-store").strip()
+logger.info(f"DEBUG: Nombre del bucket limpio y listo para usar: '[{SUPABASE_BUCKET}]'")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 ENCRYPTION_MASTER_KEY_ENV = os.getenv("ENCRYPTION_MASTER_KEY")
 if not ENCRYPTION_MASTER_KEY_ENV:
