@@ -1,0 +1,25 @@
+# requirements.in
+
+# Framework y Servidor Web
+fastapi
+uvicorn[standard]
+python-multipart
+
+# Clientes de API (IA, DB y Vectores)
+openai
+pinecone
+supabase
+requests
+
+# Autenticación y Criptografía
+passlib[bcrypt]
+python-jose[cryptography]
+
+# Modelos de Datos y Validación
+pydantic
+email-validator
+
+# Utilidades y Herramientas
+python-dotenv
+langdetect
+aiofiles

@@ -10,11 +10,10 @@ from datetime import datetime, timedelta, timezone
 from json.decoder import JSONDecodeError
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Body, HTTPException, Depends, status, Form, Request, BackgroundTasks, Query
+from fastapi import FastAPI, Body, HTTPException, Depends, status, Form, Request, BackgroundTasks, Query, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-
 from openai import AsyncOpenAI, OpenAIError
 from supabase import create_client, Client
 from jose import JWTError, jwt
@@ -24,12 +23,14 @@ from pinecone import Pinecone, PineconeException
 from langdetect import detect as detect_language, LangDetectException, DetectorFactory
 
 # --- Setup ---
+
 DetectorFactory.seed = 0
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("multi_tenant_agent_final")
 
 # --- Constants & Config ---
+
 REQUIRED_VARS = ["SUPABASE_URL", "SUPABASE_SERVICE_KEY", "JWT_SECRET_KEY", "ENCRYPTION_MASTER_KEY", "PINECONE_API_KEY"]
 if missing_vars := [v for v in REQUIRED_VARS if not os.getenv(v)]:
     raise RuntimeError(f"Faltan variables de entorno obligatorias: {', '.join(missing_vars)}")
@@ -43,6 +44,7 @@ PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
 SUPPORTED_LANG_CODES = {"es", "it", "pt", "en", "fr", "de"}
 
 # --- Global Cache & Clients ---
+
 TENANT_CONFIG_CACHE: Dict[str, Dict[str, Any]] = {}
 PINECONE_INDEX_CACHE: Dict[str, Any] = {}
 try:
@@ -55,20 +57,28 @@ except Exception as e:
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 cipher = Fernet(ENCRYPTION_MASTER_KEY)
+
 app = FastAPI(title="Agente IA Multi-Tenant (Final Version)", version="12.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 # --- Pydantic Models ---
 from pydantic import BaseModel, EmailStr
 
-class TokenData(BaseModel): tenant_id: str; identifier: str
-class ChatMessage(BaseModel): role: str; content: str
+class TokenData(BaseModel):
+    tenant_id: str
+    identifier: str
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
 class ChatRequest(BaseModel):
     history: List[ChatMessage]
     conversation_id: Optional[str] = None
     user_id_external: Optional[str] = None
 
 # --- Auth & Security ---
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
@@ -91,6 +101,7 @@ async def get_current_tenant(
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"Token inválido o expirado: {e}")
 
 # --- Helper Functions ---
+
 def load_supabase_file(path: str) -> str:
     return supabase.storage.from_(SUPABASE_BUCKET).download(path).decode("utf-8")
 
@@ -130,14 +141,15 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
     
     if not name or not args_str:
         return {"success": False, "error": "Llamada a función malformada."}
-        
+    
     logger.info(f"Procesando webhook '{name}' para '{tenant_info['identifier']}'")
     try:
         webhook_url = tenant_config.get("recoleccion_webhook_url")
         if not webhook_url: return {"success": False, "error": "URL de webhook no configurada."}
-
+        
         args_dict = json.loads(args_str)
         payload = {**args_dict, "_tenant_info": tenant_info}
+        
         response = requests.post(webhook_url, json=payload, timeout=15)
         response.raise_for_status()
         
@@ -145,7 +157,6 @@ def handle_function_call(tool_call: dict, tenant_config: dict, tenant_info: dict
             return {"success": True, "data": response.json()}
         except JSONDecodeError:
             return {"success": True, "data": "Webhook ejecutado exitosamente sin contenido de respuesta."}
-            
     except Exception as e:
         logger.error(f"Error en webhook para '{name}': {e}")
         return {"success": False, "error": str(e)}
@@ -161,6 +172,7 @@ def save_chat_history_to_db(tenant_id: str, conv_id: str, user_ext_id: str, user
         logger.error(f"Error guardando historial para conv_id {conv_id}: {e}")
 
 # --- Core Logic ---
+
 async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI, config: dict, tenant_info: dict, bg_tasks: BackgroundTasks, req_data: ChatRequest) -> AsyncGenerator[str, None]:
     full_assistant_response = ""
     tool_calls = []
@@ -177,7 +189,6 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
                 for tc_chunk in delta.tool_calls:
                     if len(tool_calls) <= tc_chunk.index:
                         tool_calls.append({"id": "", "type": "function", "function": {"name": "", "arguments": ""}})
-                    
                     tc = tool_calls[tc_chunk.index]
                     if tc_chunk.id: tc["id"] = tc_chunk.id
                     if tc_chunk.function:
@@ -186,13 +197,11 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
 
         if tool_calls:
             messages.append({"role": "assistant", "tool_calls": tool_calls})
-            
-            # Guardar información de la herramienta para usar después
             tool_success_info = []
+            
             for tool_call in tool_calls:
                 result = handle_function_call(tool_call, config, tenant_info)
                 messages.append({"role": "tool", "tool_call_id": tool_call["id"], "content": json.dumps(result)})
-                
                 if result.get("success"):
                     function_name = tool_call.get("function", {}).get("name")
                     if function_name:
@@ -200,8 +209,7 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
                         texto_adicional = get_data_critico(tenant_info["tenant_id"], clave_critica)
                         if texto_adicional:
                             tool_success_info.append(texto_adicional)
-
-            # Primero: generar la respuesta de OpenAI
+            
             stream2 = await client.chat.completions.create(model="gpt-4.1", messages=messages, stream=True)
             async for chunk in stream2:
                 if chunk.choices[0].delta.content:
@@ -209,74 +217,172 @@ async def stream_chat_generator(messages: list, tools: list, client: AsyncOpenAI
                     full_assistant_response += delta_content
                     yield f"data: {json.dumps({'type': 'content_delta', 'data': delta_content})}\n\n"
 
-            # Segundo: añadir el texto crítico DESPUÉS de la respuesta de OpenAI
             for texto_adicional in tool_success_info:
                 texto_con_salto = f"\n\n{texto_adicional}"
                 full_assistant_response += texto_con_salto
                 yield f"data: {json.dumps({'type': 'content_delta', 'data': texto_con_salto})}\n\n"
-                logger.info(f"Texto crítico añadido después de la respuesta de OpenAI.")
-
+    
     except OpenAIError as e:
         logger.error(f"Error de OpenAI para '{tenant_info['identifier']}': {e}", exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'data': 'Error comunicándose con el asistente.'})}\n\n"
         return
+    
     finally:
         conv_id = req_data.conversation_id or f"conv_{datetime.now(timezone.utc).isoformat()}"
         if full_assistant_response and req_data.history:
             bg_tasks.add_task(save_chat_history_to_db, tenant_info["tenant_id"], conv_id, req_data.user_id_external or "unknown", req_data.history[-1].content, full_assistant_response.strip())
         yield f"data: {json.dumps({'type': 'end_of_stream', 'conversation_id': conv_id})}\n\n"
 
-# --- API Endpoints ---
-@app.post("/token")
-async def token_endpoint(api_key_botpress: str = Form(...)):
-    if not supabase: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE)
-    resp = supabase.table("tenants").select("id,identifier,api_key_hash").eq("is_active", True).execute()
-    for row in resp.data:
-        if pwd_context.verify(api_key_botpress, row["api_key_hash"]):
-            token = create_access_token({"tenant_id": str(row["id"]), "identifier": row["identifier"]})
-            return {"response": {"access_token": token, "token_type": "bearer"}}
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API Key inválida o inquilino inactivo")
+# --- NUEVA LÓGICA DE CHAT CENTRALIZADA ---
+async def _process_chat_logic(
+    bg_tasks: BackgroundTasks,
+    full_history: List[ChatMessage],
+    conversation_id: Optional[str],
+    user_id_external: Optional[str],
+    tenant: TokenData
+):
+    """
+    Función central que maneja la lógica de chat, independientemente de la fuente de entrada (texto o audio).
+    """
+    if not all([supabase, pc]):
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Servicios de backend no disponibles.")
 
-@app.post("/chat")
-async def chat_endpoint(bg_tasks: BackgroundTasks, data: ChatRequest, tenant: TokenData = Depends(get_current_tenant)):
-    if not all([supabase, pc]): raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE)
-    
     try:
         config = await get_or_load_tenant_config(tenant.tenant_id, tenant.identifier)
         client = AsyncOpenAI(api_key=config["openai_api_key_decrypted"])
         
         lang = config.get("default_language_code", "es")
-        if data.history and (user_msg := data.history[-1].content):
+        user_msg_content = ""
+        if full_history and (last_msg := full_history[-1]).role == 'user':
+            user_msg_content = last_msg.content
             try:
-                if (detected := detect_language(user_msg)) in SUPPORTED_LANG_CODES: lang = detected
-            except LangDetectException: pass
+                if (detected_lang := detect_language(user_msg_content)) in SUPPORTED_LANG_CODES:
+                    lang = detected_lang
+            except LangDetectException:
+                pass  # Mantener idioma por defecto si la detección falla
         
         system_msg = config["system_md_template"] + f"\n\n[Instrucción: Idioma es '{lang}'. Responde en este idioma.]"
-        
         rag_ctx = ""
-        if (idx := config.get("pinecone_index_name")) and (ns := config.get("pinecone_namespace")) and data.history:
+        
+        if (idx := config.get("pinecone_index_name")) and (ns := config.get("pinecone_namespace")) and user_msg_content:
             try:
                 if idx not in PINECONE_INDEX_CACHE:
                     PINECONE_INDEX_CACHE[idx] = pc.Index(idx)
+                
                 pinecone_index = PINECONE_INDEX_CACHE[idx]
-                emb = await client.embeddings.create(input=[data.history[-1].content], model="text-embedding-3-small")
-                matches = pinecone_index.query(namespace=ns, vector=emb.data[0].embedding, top_k=5, include_metadata=True).matches
+                emb_response = await client.embeddings.create(input=[user_msg_content], model="text-embedding-3-small")
+                matches = pinecone_index.query(namespace=ns, vector=emb_response.data[0].embedding, top_k=5, include_metadata=True).matches
+                
                 if relevant_texts := [m.metadata['text'] for m in matches if m.score > 0.3 and 'text' in m.metadata]:
                     rag_ctx = "\n\n--- CONTEXTO ---\n" + "\n\n".join(relevant_texts) + "\n--- FIN CONTEXTO ---"
             except Exception as e:
                 logger.error(f"Error en RAG para '{tenant.identifier}': {e}")
         
-        messages = [{"role": "system", "content": system_msg + rag_ctx}] + [msg.model_dump() for msg in data.history]
+        messages = [{"role": "system", "content": system_msg + rag_ctx}] + [msg.model_dump() for msg in full_history]
         
-        generator = stream_chat_generator(messages, config["custom_tools"], client, config, tenant.model_dump(), bg_tasks, data)
+        # Construir un objeto ChatRequest para la función de guardado en background
+        chat_request_for_saver = ChatRequest(
+            history=full_history,
+            conversation_id=conversation_id,
+            user_id_external=user_id_external
+        )
+
+        generator = stream_chat_generator(messages, config["custom_tools"], client, config, tenant.model_dump(), bg_tasks, chat_request_for_saver)
         return StreamingResponse(generator, media_type="text/event-stream")
 
     except Exception as e:
-        logger.error(f"Error INESPERADO en /chat para '{tenant.identifier}': {e}", exc_info=True)
+        logger.error(f"Error INESPERADO en lógica de chat para '{tenant.identifier}': {e}", exc_info=True)
         return JSONResponse(status_code=500, content={"detail": f"Error interno: {e}"})
 
+# --- API Endpoints ---
+
+@app.post("/token")
+async def token_endpoint(api_key_botpress: str = Form(...)):
+    if not supabase: raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE)
+    
+    resp = supabase.table("tenants").select("id,identifier,api_key_hash").eq("is_active", True).execute()
+    for row in resp.data:
+        if pwd_context.verify(api_key_botpress, row["api_key_hash"]):
+            token = create_access_token({"tenant_id": str(row["id"]), "identifier": row["identifier"]})
+            return {"response": {"access_token": token, "token_type": "bearer"}}
+            
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "API Key inválida o inquilino inactivo")
+
+# --- ENDPOINT REFACTORIZADO PARA TEXTO ---
+@app.post("/chat")
+async def chat_endpoint(bg_tasks: BackgroundTasks, data: ChatRequest, tenant: TokenData = Depends(get_current_tenant)):
+    """
+    Endpoint para recibir mensajes de texto. Llama a la lógica central de chat.
+    """
+    return await _process_chat_logic(
+        bg_tasks=bg_tasks,
+        full_history=data.history,
+        conversation_id=data.conversation_id,
+        user_id_external=data.user_id_external,
+        tenant=tenant
+    )
+
+# --- NUEVO ENDPOINT PARA AUDIO ---
+@app.post("/chat/audio")
+async def chat_audio_endpoint(
+    bg_tasks: BackgroundTasks,
+    tenant: TokenData = Depends(get_current_tenant),
+    audio_file: UploadFile = File(...),
+    history_json: str = Form("[]"),
+    conversation_id: Optional[str] = Form(None),
+    user_id_external: Optional[str] = Form(None)
+):
+    """
+    Endpoint para recibir notas de voz, transcribirlas y procesarlas como un mensaje de chat.
+    """
+    # 1. Cargar configuración y cliente de OpenAI para la transcripción
+    try:
+        config = await get_or_load_tenant_config(tenant.tenant_id, tenant.identifier)
+        client = AsyncOpenAI(api_key=config["openai_api_key_decrypted"])
+    except Exception as e:
+        logger.error(f"Error cargando config para '{tenant.identifier}': {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"detail": f"Error de configuración interna."})
+
+    # 2. Transcribir el audio usando Whisper
+    try:
+        audio_content = await audio_file.read()
+        transcription = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(audio_file.filename, audio_content, audio_file.content_type)
+        )
+        user_message_text = transcription.text
+        logger.info(f"Audio transcrito para '{tenant.identifier}': '{user_message_text}'")
+    except OpenAIError as e:
+        logger.error(f"Error en transcripción de Whisper para '{tenant.identifier}': {e}")
+        raise HTTPException(status_code=500, detail="Error al transcribir el audio.")
+    except Exception as e:
+        logger.error(f"Error leyendo archivo de audio: {e}")
+        raise HTTPException(status_code=400, detail="No se pudo procesar el archivo de audio.")
+
+    # 3. Preparar el historial de conversación
+    try:
+        history_list = json.loads(history_json)
+        # Validar y convertir la lista de dicts a una lista de ChatMessage
+        history = [ChatMessage.model_validate(msg) for msg in history_list]
+    except (JSONDecodeError, TypeError) as e:
+        logger.error(f"Error decodificando el historial JSON desde el formulario: {e}")
+        raise HTTPException(status_code=400, detail="El formato del historial proporcionado es inválido.")
+    
+    # Añadir el mensaje transcrito al historial
+    full_history = history + [ChatMessage(role="user", content=user_message_text)]
+
+    # 4. Llamar a la lógica de chat centralizada
+    return await _process_chat_logic(
+        bg_tasks=bg_tasks,
+        full_history=full_history,
+        conversation_id=conversation_id,
+        user_id_external=user_id_external,
+        tenant=tenant
+    )
+
 @app.get("/health")
-async def health_check(): return {"status": "ok"}
+async def health_check():
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn
