@@ -21,6 +21,7 @@ from passlib.context import CryptContext
 from cryptography.fernet import Fernet
 from pinecone import Pinecone, PineconeException
 from langdetect import detect as detect_language, LangDetectException, DetectorFactory
+import aiohttp
 
 # --- Setup ---
 
@@ -322,7 +323,7 @@ async def chat_endpoint(bg_tasks: BackgroundTasks, data: ChatRequest, tenant: To
         tenant=tenant
     )
 
-# --- NUEVO ENDPOINT PARA AUDIO ---
+# --- ENDPOINT ORIGINAL PARA AUDIO (MANTENER PARA COMPATIBILIDAD) ---
 @app.post("/chat/audio")
 async def chat_audio_endpoint(
     bg_tasks: BackgroundTasks,
@@ -372,6 +373,86 @@ async def chat_audio_endpoint(
     full_history = history + [ChatMessage(role="user", content=user_message_text)]
 
     # 4. Llamar a la lógica de chat centralizada
+    return await _process_chat_logic(
+        bg_tasks=bg_tasks,
+        full_history=full_history,
+        conversation_id=conversation_id,
+        user_id_external=user_id_external,
+        tenant=tenant
+    )
+
+# --- NUEVO ENDPOINT PARA AUDIO CON URL (SOLUCIÓN PARA BOTPRESS) ---
+@app.post("/chat/audio-url")
+async def chat_audio_url_endpoint(
+    bg_tasks: BackgroundTasks,
+    tenant: TokenData = Depends(get_current_tenant),
+    audio_url: str = Form(...),
+    history_json: str = Form("[]"),
+    conversation_id: Optional[str] = Form(None),
+    user_id_external: Optional[str] = Form(None)
+):
+    """
+    Endpoint para recibir URLs de audio, descargarlas, transcribirlas y procesarlas.
+    Este endpoint soluciona los problemas de compatibilidad con FormData en Botpress.
+    """
+    # 1. Cargar configuración y cliente de OpenAI
+    try:
+        config = await get_or_load_tenant_config(tenant.tenant_id, tenant.identifier)
+        client = AsyncOpenAI(api_key=config["openai_api_key_decrypted"])
+    except Exception as e:
+        logger.error(f"Error cargando config para '{tenant.identifier}': {e}", exc_info=True)
+        return JSONResponse(status_code=500, content={"detail": "Error de configuración interna."})
+
+    # 2. Descargar el audio desde la URL
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(audio_url) as response:
+                if response.status != 200:
+                    raise Exception(f"Error descargando audio: HTTP {response.status}")
+                audio_content = await response.read()
+        
+        logger.info(f"Audio descargado exitosamente desde: {audio_url}")
+    except Exception as e:
+        logger.error(f"Error descargando audio desde '{audio_url}': {e}")
+        raise HTTPException(status_code=400, detail="No se pudo descargar el archivo de audio.")
+
+    # 3. Transcribir el audio usando Whisper
+    try:
+        # Determinar el formato del archivo por la URL
+        filename = "voicenote.ogg"
+        content_type = "audio/ogg"
+        if ".mp4" in audio_url:
+            filename = "voicenote.mp4"
+            content_type = "audio/mp4"
+        elif ".oga" in audio_url:
+            filename = "voicenote.oga"
+            content_type = "audio/ogg"
+            
+        transcription = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=(filename, audio_content, content_type)
+        )
+        user_message_text = transcription.text
+        logger.info(f"Audio transcrito para '{tenant.identifier}': '{user_message_text}'")
+    except OpenAIError as e:
+        logger.error(f"Error en transcripción de Whisper para '{tenant.identifier}': {e}")
+        raise HTTPException(status_code=500, detail="Error al transcribir el audio.")
+    except Exception as e:
+        logger.error(f"Error procesando audio: {e}")
+        raise HTTPException(status_code=500, detail="Error al procesar el archivo de audio.")
+
+    # 4. Preparar el historial de conversación
+    try:
+        history_list = json.loads(history_json)
+        history = [ChatMessage.model_validate(msg) for msg in history_list]
+    except (JSONDecodeError, TypeError) as e:
+        logger.error(f"Error decodificando el historial JSON: {e}")
+        raise HTTPException(status_code=400, detail="El formato del historial es inválido.")
+    
+    # Añadir el mensaje transcrito al historial
+    full_history = history + [ChatMessage(role="user", content=user_message_text)]
+
+    # 5. Llamar a la lógica de chat centralizada
     return await _process_chat_logic(
         bg_tasks=bg_tasks,
         full_history=full_history,
